@@ -61,7 +61,7 @@ def download_lora():
 print("[ACE-Step] Loading model...")
 load_start = time.time()
 
-from ace_step.pipeline import ACEStepPipeline
+from acestep.pipeline import ACEStepPipeline
 
 pipeline = ACEStepPipeline()
 
