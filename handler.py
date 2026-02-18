@@ -73,8 +73,13 @@ pipeline = ACEStepPipeline()
 # Download and load LoRA
 lora_available = download_lora()
 if lora_available:
-    print(f"[ACE-Step] Loading LoRA from {LORA_DIR} (weight={LORA_SCALE})")
-    pipeline.load_lora(LORA_DIR, lora_weight=LORA_SCALE)
+    try:
+        print(f"[ACE-Step] Loading LoRA from {LORA_DIR} (weight={LORA_SCALE})")
+        pipeline.load_lora(LORA_DIR, lora_weight=LORA_SCALE)
+        print("[ACE-Step] LoRA loaded successfully")
+    except Exception as e:
+        print(f"[ACE-Step] LoRA loading failed, continuing with base model: {e}")
+        lora_available = False
 else:
     print("[ACE-Step] Running base model (no LoRA)")
 
