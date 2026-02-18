@@ -3,14 +3,12 @@ RunPod Serverless Handler for ACE-Step Music Generation
 
 Loads ACE-Step model + Turkish LoRA at cold start.
 LoRA is downloaded from Supabase Storage (ace-lora bucket) at startup.
-Accepts generation requests, produces WAV/MP3, uploads to Supabase Storage.
-Returns URLs to the generated audio files.
+Generates audio, uploads to Supabase Storage, returns URLs.
 
 Env vars (set in RunPod Template):
   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
   LORA_FILENAME (default: adapter_model.safetensors)
   LORA_SCALE (default: 0.2)
-  OUTPUT_FORMAT (default: mp3)
 """
 
 import os
@@ -21,16 +19,15 @@ import tempfile
 import subprocess
 
 import runpod
-import torch
 from supabase import create_client
 
 # ---------------------------------------------------------------------------
-# Global model loading (runs once at cold start)
+# Config
 # ---------------------------------------------------------------------------
 LORA_FILENAME = os.environ.get("LORA_FILENAME", "adapter_model.safetensors")
 LORA_SCALE = float(os.environ.get("LORA_SCALE", "0.2"))
-OUTPUT_FORMAT = os.environ.get("OUTPUT_FORMAT", "mp3")
-LORA_LOCAL_PATH = f"/tmp/lora/{LORA_FILENAME}"
+LORA_DIR = "/tmp/lora"
+LORA_LOCAL_PATH = os.path.join(LORA_DIR, "pytorch_lora_weights.safetensors")
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
@@ -39,10 +36,13 @@ LORA_BUCKET = "ace-lora"
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Download LoRA from Supabase Storage at cold start
+
+# ---------------------------------------------------------------------------
+# Download LoRA from Supabase at cold start
+# ---------------------------------------------------------------------------
 def download_lora():
     """Download LoRA weights from Supabase ace-lora bucket."""
-    os.makedirs(os.path.dirname(LORA_LOCAL_PATH), exist_ok=True)
+    os.makedirs(LORA_DIR, exist_ok=True)
     if os.path.exists(LORA_LOCAL_PATH):
         print(f"[ACE-Step] LoRA already cached at {LORA_LOCAL_PATH}")
         return True
@@ -50,6 +50,7 @@ def download_lora():
         print(f"[ACE-Step] Downloading LoRA '{LORA_FILENAME}' from Supabase...")
         dl_start = time.time()
         data = supabase.storage.from_(LORA_BUCKET).download(LORA_FILENAME)
+        # ACE-Step expects 'pytorch_lora_weights.safetensors' in the directory
         with open(LORA_LOCAL_PATH, "wb") as f:
             f.write(data)
         print(f"[ACE-Step] LoRA downloaded in {time.time() - dl_start:.1f}s ({len(data) / 1024 / 1024:.1f}MB)")
@@ -58,24 +59,31 @@ def download_lora():
         print(f"[ACE-Step] Failed to download LoRA: {e}")
         return False
 
+
+# ---------------------------------------------------------------------------
+# Load model (runs once at cold start)
+# ---------------------------------------------------------------------------
 print("[ACE-Step] Loading model...")
 load_start = time.time()
 
-from acestep.pipeline import ACEStepPipeline
+from acestep.pipeline_ace_step import ACEStepPipeline
 
 pipeline = ACEStepPipeline()
 
 # Download and load LoRA
 lora_available = download_lora()
 if lora_available:
-    print(f"[ACE-Step] Loading LoRA from {LORA_LOCAL_PATH} (scale={LORA_SCALE})")
-    pipeline.load_lora(LORA_LOCAL_PATH, lora_scale=LORA_SCALE)
+    print(f"[ACE-Step] Loading LoRA from {LORA_DIR} (weight={LORA_SCALE})")
+    pipeline.load_lora(LORA_DIR, lora_weight=LORA_SCALE)
 else:
     print("[ACE-Step] Running base model (no LoRA)")
 
 print(f"[ACE-Step] Model loaded in {time.time() - load_start:.1f}s")
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 def convert_wav_to_mp3(wav_path: str) -> str:
     """Convert WAV to MP3 using ffmpeg."""
     mp3_path = wav_path.replace(".wav", ".mp3")
@@ -99,17 +107,16 @@ def upload_to_supabase(file_path: str, filename: str) -> str:
     return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET_NAME}/{filename}"
 
 
+# ---------------------------------------------------------------------------
+# RunPod Handler
+# ---------------------------------------------------------------------------
 def handler(job):
     """
-    RunPod handler function.
-
     Input:
       - lyrics (str): Song lyrics
       - caption (str): Style/prompt description
       - duration (int): Target duration in seconds (default 120)
       - num_songs (int): Number of songs to generate (default 2)
-      - lora_scale (float): Override LoRA scale (optional)
-      - reference_audio_b64 (str): Base64-encoded reference audio (optional)
 
     Output:
       - songs: list of { url, duration, title }
@@ -120,67 +127,59 @@ def handler(job):
     caption = input_data.get("caption", "")
     duration = input_data.get("duration", 120)
     num_songs = min(input_data.get("num_songs", 2), 4)
-    lora_scale_override = input_data.get("lora_scale")
-    reference_audio_b64 = input_data.get("reference_audio_b64")
-
-    # Override LoRA scale if provided
-    if lora_scale_override is not None and lora_scale_override != LORA_SCALE and lora_available:
-        pipeline.load_lora(LORA_LOCAL_PATH, lora_scale=float(lora_scale_override))
-
-    # Handle reference audio
-    reference_audio_path = None
-    if reference_audio_b64:
-        try:
-            audio_bytes = base64.b64decode(reference_audio_b64)
-            tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
-            tmp.write(audio_bytes)
-            tmp.close()
-            reference_audio_path = tmp.name
-        except Exception as e:
-            print(f"[ACE-Step] Failed to decode reference audio: {e}")
 
     songs = []
     job_id = job.get("id", str(uuid.uuid4())[:8])
+
+    # Create temp output directory
+    output_dir = tempfile.mkdtemp(prefix="ace_")
 
     for i in range(num_songs):
         gen_start = time.time()
         print(f"[ACE-Step] Generating song {i+1}/{num_songs}...")
 
         try:
-            # Generate audio
-            gen_kwargs = {
-                "lyrics": lyrics,
-                "caption": caption,
-                "duration": duration,
-            }
-            if reference_audio_path:
-                gen_kwargs["reference_audio"] = reference_audio_path
+            # ACE-Step pipeline returns list of file paths + metadata dict
+            results = pipeline(
+                format="wav",
+                audio_duration=float(duration),
+                prompt=caption,
+                lyrics=lyrics,
+                infer_step=60,
+                guidance_scale=15.0,
+                scheduler_type="euler",
+                cfg_type="apg",
+                manual_seeds=[int(time.time() * 1000 + i) % (2**31)],
+                save_path=output_dir,
+            )
 
-            audio_output = pipeline.generate(**gen_kwargs)
+            # Results = [path1, path2, ..., metadata_dict]
+            # We generate one song at a time, so expect [path, metadata]
+            audio_path = None
+            for r in results:
+                if isinstance(r, str) and os.path.isfile(r):
+                    audio_path = r
+                    break
 
-            # Save WAV to temp file
-            wav_path = tempfile.mktemp(suffix=".wav")
-            pipeline.save_audio(audio_output, wav_path)
+            if not audio_path:
+                raise RuntimeError("No audio file generated")
 
-            # Convert to MP3 if requested
-            if OUTPUT_FORMAT == "mp3":
-                final_path = convert_wav_to_mp3(wav_path)
-                os.unlink(wav_path)
-            else:
-                final_path = wav_path
+            # Convert WAV to MP3
+            mp3_path = convert_wav_to_mp3(audio_path)
+            os.unlink(audio_path)
 
-            # Get actual duration from file
+            # Get actual duration
             probe = subprocess.run(
                 ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-                 "-of", "csv=p=0", final_path],
+                 "-of", "csv=p=0", mp3_path],
                 capture_output=True, text=True,
             )
             actual_duration = float(probe.stdout.strip()) if probe.stdout.strip() else duration
 
             # Upload to Supabase
-            ext = "mp3" if OUTPUT_FORMAT == "mp3" else "wav"
-            filename = f"{job_id}_{i+1}.{ext}"
-            url = upload_to_supabase(final_path, filename)
+            filename = f"{job_id}_{i+1}.mp3"
+            url = upload_to_supabase(mp3_path, filename)
+            os.unlink(mp3_path)
 
             songs.append({
                 "url": url,
@@ -188,11 +187,8 @@ def handler(job):
                 "title": f"ACE Song {i+1}",
             })
 
-            # Cleanup temp file
-            os.unlink(final_path)
-
             gen_time = time.time() - gen_start
-            print(f"[ACE-Step] Song {i+1} done in {gen_time:.1f}s")
+            print(f"[ACE-Step] Song {i+1} done in {gen_time:.1f}s → {url}")
 
         except Exception as e:
             print(f"[ACE-Step] Error generating song {i+1}: {e}")
@@ -202,10 +198,6 @@ def handler(job):
                 "title": f"ACE Song {i+1} (failed)",
                 "error": str(e),
             })
-
-    # Cleanup reference audio temp file
-    if reference_audio_path and os.path.exists(reference_audio_path):
-        os.unlink(reference_audio_path)
 
     return {"songs": songs}
 
