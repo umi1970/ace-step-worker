@@ -1,7 +1,8 @@
 """
-RunPod Serverless Handler for ACE-Step Music Generation
+RunPod Serverless Handler for ACE-Step v1.5 Music Generation
 
-Loads ACE-Step model + Turkish LoRA at cold start.
+Uses ACE-Step v1.5 programmatic API (AceStepHandler + generate_music).
+Loads model + Turkish LoRA at cold start.
 LoRA is downloaded from Supabase Storage (ace-lora bucket) at startup.
 Generates audio, uploads to Supabase Storage, returns URLs.
 
@@ -14,9 +15,9 @@ Env vars (set in RunPod Template):
 import os
 import uuid
 import time
-import base64
 import tempfile
 import subprocess
+import glob as glob_mod
 
 import runpod
 from supabase import create_client
@@ -27,12 +28,15 @@ from supabase import create_client
 LORA_FILENAME = os.environ.get("LORA_FILENAME", "adapter_model.safetensors")
 LORA_SCALE = float(os.environ.get("LORA_SCALE", "0.2"))
 LORA_DIR = "/tmp/lora"
-LORA_LOCAL_PATH = os.path.join(LORA_DIR, "pytorch_lora_weights.safetensors")
+LORA_LOCAL_PATH = os.path.join(LORA_DIR, LORA_FILENAME)
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 BUCKET_NAME = "mastered-songs"
 LORA_BUCKET = "ace-lora"
+
+# ACE-Step v1.5 repo is cloned to /app/ace-step-repo by Dockerfile
+PROJECT_ROOT = "/app/ace-step-repo"
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -41,49 +45,74 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 # Download LoRA from Supabase at cold start
 # ---------------------------------------------------------------------------
 def download_lora():
-    """Download LoRA weights from Supabase ace-lora bucket."""
+    """Download LoRA weights + config from Supabase ace-lora bucket."""
     os.makedirs(LORA_DIR, exist_ok=True)
-    if os.path.exists(LORA_LOCAL_PATH):
-        print(f"[ACE-Step] LoRA already cached at {LORA_LOCAL_PATH}")
-        return True
-    try:
+
+    config_path = os.path.join(LORA_DIR, "adapter_config.json")
+
+    # Download adapter_model.safetensors
+    if not os.path.exists(LORA_LOCAL_PATH):
         print(f"[ACE-Step] Downloading LoRA '{LORA_FILENAME}' from Supabase...")
         dl_start = time.time()
         data = supabase.storage.from_(LORA_BUCKET).download(LORA_FILENAME)
-        # ACE-Step expects 'pytorch_lora_weights.safetensors' in the directory
         with open(LORA_LOCAL_PATH, "wb") as f:
             f.write(data)
-        print(f"[ACE-Step] LoRA downloaded in {time.time() - dl_start:.1f}s ({len(data) / 1024 / 1024:.1f}MB)")
-        return True
-    except Exception as e:
-        print(f"[ACE-Step] Failed to download LoRA: {e}")
-        return False
+        print(f"[ACE-Step] LoRA weights downloaded in {time.time() - dl_start:.1f}s "
+              f"({len(data) / 1024 / 1024:.1f}MB)")
+    else:
+        print(f"[ACE-Step] LoRA weights already cached at {LORA_LOCAL_PATH}")
+
+    # Download adapter_config.json (v1.5 REQUIRES this file!)
+    if not os.path.exists(config_path):
+        print("[ACE-Step] Downloading adapter_config.json from Supabase...")
+        config_data = supabase.storage.from_(LORA_BUCKET).download("adapter_config.json")
+        with open(config_path, "wb") as f:
+            f.write(config_data)
+        print("[ACE-Step] adapter_config.json downloaded")
+    else:
+        print("[ACE-Step] adapter_config.json already cached")
 
 
 # ---------------------------------------------------------------------------
-# Load model (runs once at cold start)
+# Load model (runs once at cold start) — ACE-Step v1.5 API
 # ---------------------------------------------------------------------------
-print("[ACE-Step] Loading model...")
+print("[ACE-Step] Loading model (v1.5 API)...")
 load_start = time.time()
 
-from acestep.pipeline_ace_step import ACEStepPipeline
+from acestep.handler import AceStepHandler
+from acestep.inference import GenerationParams, GenerationConfig, generate_music
 
-pipeline = ACEStepPipeline()
+# Step 1: Create DiT handler and initialize the service
+dit_handler = AceStepHandler()
+init_status, init_success = dit_handler.initialize_service(
+    project_root=PROJECT_ROOT,
+    config_path="acestep-v15-turbo",  # Turbo model (8-step inference)
+    device="cuda",
+    use_flash_attention=False,
+    compile_model=False,
+    offload_to_cpu=False,
+    offload_dit_to_cpu=False,
+    quantization=None,
+    use_mlx_dit=False,  # Not on Apple Silicon
+)
+print(f"[ACE-Step] Init status: {init_status}")
+if not init_success:
+    raise RuntimeError(f"Failed to initialize ACE-Step: {init_status}")
 
-# Force checkpoint loading (normally lazy-loaded on first __call__)
-# This creates ace_step_transformer which is needed for LoRA
-if not pipeline.loaded:
-    print("[ACE-Step] Loading checkpoint explicitly for LoRA support...")
-    pipeline.load_checkpoint(pipeline.checkpoint_dir)
+# Step 2: Download and load LoRA (MUST succeed — no silent fallback!)
+download_lora()
 
-# Download and load LoRA
-lora_available = download_lora()
-if lora_available:
-    print(f"[ACE-Step] Loading LoRA from {LORA_DIR} (weight={LORA_SCALE})")
-    pipeline.load_lora(LORA_DIR, lora_weight=LORA_SCALE)
-    print("[ACE-Step] LoRA loaded successfully")
-else:
-    raise RuntimeError("LoRA download failed — refusing to run without LoRA")
+print(f"[ACE-Step] Loading LoRA from {LORA_DIR} (scale={LORA_SCALE})")
+lora_msg = dit_handler.load_lora(LORA_DIR)
+print(f"[ACE-Step] LoRA load result: {lora_msg}")
+
+# v1.5 returns "❌ ..." on failure — crash if LoRA didn't load
+if "❌" in str(lora_msg):
+    raise RuntimeError(f"LoRA loading failed: {lora_msg}")
+
+dit_handler.set_lora_scale(LORA_SCALE)
+dit_handler.set_use_lora(True)
+print(f"[ACE-Step] LoRA active with scale={LORA_SCALE}")
 
 print(f"[ACE-Step] Model loaded in {time.time() - load_start:.1f}s")
 
@@ -91,11 +120,11 @@ print(f"[ACE-Step] Model loaded in {time.time() - load_start:.1f}s")
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def convert_wav_to_mp3(wav_path: str) -> str:
-    """Convert WAV to MP3 using ffmpeg."""
-    mp3_path = wav_path.replace(".wav", ".mp3")
+def convert_to_mp3(audio_path: str) -> str:
+    """Convert any audio file to MP3 using ffmpeg."""
+    mp3_path = os.path.splitext(audio_path)[0] + ".mp3"
     subprocess.run(
-        ["ffmpeg", "-y", "-i", wav_path, "-b:a", "320k", "-q:a", "0", mp3_path],
+        ["ffmpeg", "-y", "-i", audio_path, "-b:a", "320k", "-q:a", "0", mp3_path],
         capture_output=True,
         check=True,
     )
@@ -139,43 +168,70 @@ def handler(job):
     job_id = job.get("id", str(uuid.uuid4())[:8])
 
     # Create temp output directory
-    output_dir = tempfile.mkdtemp(prefix="ace_")
+    save_dir = tempfile.mkdtemp(prefix="ace_")
 
     for i in range(num_songs):
         gen_start = time.time()
         print(f"[ACE-Step] Generating song {i+1}/{num_songs}...")
 
         try:
-            # ACE-Step pipeline returns list of file paths + metadata dict
-            results = pipeline(
-                format="wav",
-                audio_duration=float(duration),
-                prompt=caption,
+            # Build generation parameters (v1.5 dataclass API)
+            seed = int(time.time() * 1000 + i) % (2**31)
+            params = GenerationParams(
+                task_type="text2music",
+                caption=caption,
                 lyrics=lyrics,
-                infer_step=60,
-                guidance_scale=15.0,
-                scheduler_type="euler",
-                cfg_type="apg",
-                manual_seeds=[int(time.time() * 1000 + i) % (2**31)],
-                save_path=output_dir,
+                duration=float(duration),
+                vocal_language="tr",  # Turkish LoRA
+                inference_steps=8,    # Turbo model = 8 steps
+                guidance_scale=7.0,
+                seed=seed,
+                shift=3.0,            # Recommended for turbo
+                infer_method="ode",   # Deterministic, faster
+                use_tiled_decode=True,
             )
 
-            # Results = [path1, path2, ..., metadata_dict]
-            # We generate one song at a time, so expect [path, metadata]
-            audio_path = None
-            for r in results:
-                if isinstance(r, str) and os.path.isfile(r):
-                    audio_path = r
-                    break
+            config = GenerationConfig(
+                batch_size=1,
+                audio_format="wav",   # We convert to MP3 ourselves
+            )
 
-            if not audio_path:
-                raise RuntimeError("No audio file generated")
+            # Generate using v1.5 inference API
+            # llm_handler=None means no LM chain-of-thought (DiT-only, faster)
+            result = generate_music(
+                dit_handler=dit_handler,
+                llm_handler=None,
+                params=params,
+                config=config,
+                save_dir=save_dir,
+            )
 
-            # Convert WAV to MP3
-            mp3_path = convert_wav_to_mp3(audio_path)
-            os.unlink(audio_path)
+            if not result.success:
+                raise RuntimeError(f"Generation failed: {result.error or result.status_message}")
 
-            # Get actual duration
+            # result.audios is a list of dicts with 'path', 'tensor', 'key', etc.
+            if not result.audios or len(result.audios) == 0:
+                raise RuntimeError("No audio files in result")
+
+            audio_info = result.audios[0]
+            audio_path = audio_info.get("path")
+
+            # If no path saved, try to find generated files in save_dir
+            if not audio_path or not os.path.isfile(audio_path):
+                found = glob_mod.glob(os.path.join(save_dir, "*.wav")) + \
+                        glob_mod.glob(os.path.join(save_dir, "*.flac")) + \
+                        glob_mod.glob(os.path.join(save_dir, "*.mp3"))
+                if found:
+                    audio_path = sorted(found)[-1]  # Most recent
+                else:
+                    raise RuntimeError("No audio file found in output directory")
+
+            # Convert to MP3
+            mp3_path = convert_to_mp3(audio_path)
+            if os.path.exists(audio_path) and audio_path != mp3_path:
+                os.unlink(audio_path)
+
+            # Get actual duration via ffprobe
             probe = subprocess.run(
                 ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
                  "-of", "csv=p=0", mp3_path],
@@ -191,18 +247,18 @@ def handler(job):
             songs.append({
                 "url": url,
                 "duration": round(actual_duration, 1),
-                "title": f"ACE Song {i+1}",
             })
 
             gen_time = time.time() - gen_start
-            print(f"[ACE-Step] Song {i+1} done in {gen_time:.1f}s → {url}")
+            print(f"[ACE-Step] Song {i+1} done in {gen_time:.1f}s -> {url}")
 
         except Exception as e:
             print(f"[ACE-Step] Error generating song {i+1}: {e}")
+            import traceback
+            traceback.print_exc()
             songs.append({
                 "url": None,
                 "duration": 0,
-                "title": f"ACE Song {i+1} (failed)",
                 "error": str(e),
             })
 
