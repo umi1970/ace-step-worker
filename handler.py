@@ -70,6 +70,12 @@ from acestep.pipeline_ace_step import ACEStepPipeline
 
 pipeline = ACEStepPipeline()
 
+# Force checkpoint loading (normally lazy-loaded on first __call__)
+# This creates ace_step_transformer which is needed for LoRA
+if not pipeline.loaded:
+    print("[ACE-Step] Loading checkpoint explicitly for LoRA support...")
+    pipeline.load_checkpoint(pipeline.checkpoint_dir)
+
 # Download and load LoRA
 lora_available = download_lora()
 if lora_available:
