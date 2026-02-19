@@ -23,8 +23,16 @@ import runpod
 from supabase import create_client
 
 # ---------------------------------------------------------------------------
-# Config
+# Config — check ALL required env vars upfront
 # ---------------------------------------------------------------------------
+REQUIRED_ENV = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]
+missing = [k for k in REQUIRED_ENV if not os.environ.get(k)]
+if missing:
+    raise RuntimeError(
+        f"[ACE-Step] Missing required environment variables: {', '.join(missing)}\n"
+        f"Set these in your RunPod Template under Environment Variables."
+    )
+
 LORA_FILENAME = os.environ.get("LORA_FILENAME", "adapter_model.safetensors")
 LORA_SCALE = float(os.environ.get("LORA_SCALE", "0.2"))
 LORA_DIR = "/tmp/lora"
@@ -32,6 +40,8 @@ LORA_LOCAL_PATH = os.path.join(LORA_DIR, LORA_FILENAME)
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+
+print(f"[ACE-Step] Config: SUPABASE_URL={SUPABASE_URL[:30]}..., LORA={LORA_FILENAME}, SCALE={LORA_SCALE}")
 BUCKET_NAME = "mastered-songs"
 LORA_BUCKET = "ace-lora"
 
