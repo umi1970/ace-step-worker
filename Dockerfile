@@ -8,43 +8,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
+# Install uv (the package manager ACE-Step v1.5 uses)
+RUN pip install --no-cache-dir uv
+
 # Clone ACE-Step v1.5 repo
 RUN git clone --recurse-submodules https://github.com/ace-step/ACE-Step-1.5.git /app/ace-step-repo
 
-# Install ACE-Step v1.5 dependencies manually (keep existing PyTorch from base image)
-# The repo's requirements.txt wants PyTorch 2.10+cu128, but 2.4.0+cu124 works for inference
-# All packages from v1.5 requirements.txt EXCEPT: torch, gradio, fastapi, uvicorn,
-# lightning, tensorboard, mlx (Apple only), triton, flash-attn
-RUN pip install --no-cache-dir \
-    "transformers>=4.51.0,<4.58.0" \
-    "diffusers>=0.32.0" \
-    "peft>=0.18.0" \
-    "safetensors>=0.7.0" \
-    "accelerate>=0.30.0" \
-    "soundfile>=0.12.0" \
-    "scipy>=1.10.0" \
-    "einops>=0.7.0" \
-    "loguru>=0.7.0" \
-    "vector-quantize-pytorch>=1.14.0" \
-    "toml>=0.10.0" \
-    "numba>=0.59.0" \
-    "matplotlib>=3.7.0" \
-    "lycoris-lora>=3.0.0" \
-    "modelscope>=1.10.0" \
-    "xxhash>=3.0.0"
+# Install all ACE-Step deps via uv (same as the working RunPod pod)
+WORKDIR /app/ace-step-repo
+RUN uv sync
 
-# Install the acestep package itself (no deps — already installed above)
-RUN cd /app/ace-step-repo && pip install --no-cache-dir --no-deps -e .
-
-# Install RunPod + Supabase
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install RunPod + Supabase into the uv environment
+RUN uv pip install runpod>=1.7.0 supabase>=2.0.0
 
 # Copy handler
-COPY handler.py .
+COPY handler.py /app/handler.py
 
 # Default env vars (override in RunPod Template)
 ENV LORA_FILENAME=adapter_model.safetensors
 ENV LORA_SCALE=0.2
 
-CMD ["python", "-u", "handler.py"]
+WORKDIR /app
+CMD ["uv", "run", "--project", "/app/ace-step-repo", "python", "-u", "/app/handler.py"]
