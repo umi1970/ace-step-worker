@@ -188,7 +188,6 @@ def handler(job):
                 seed=seed,
                 shift=3.0,            # Recommended for turbo
                 infer_method="ode",   # Deterministic, faster
-                use_tiled_decode=True,
             )
 
             config = GenerationConfig(
