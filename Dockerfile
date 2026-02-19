@@ -12,8 +12,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Clone ACE-Step repo and install
-RUN git clone https://github.com/ace-step/ACE-Step.git /app/ace-step-repo && \
+# Clone ACE-Step v1.5 repo and install (LoRA uses v1.5 target modules!)
+RUN git clone https://github.com/ace-step/ACE-Step-1.5.git /app/ace-step-repo && \
     cd /app/ace-step-repo && \
     pip install --no-cache-dir -e .
 
