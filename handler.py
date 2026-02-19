@@ -31,7 +31,7 @@ LORA_LOCAL_PATH = os.path.join(LORA_DIR, "pytorch_lora_weights.safetensors")
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-BUCKET_NAME = "ace-songs"
+BUCKET_NAME = "mastered-songs"
 LORA_BUCKET = "ace-lora"
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -182,7 +182,7 @@ def handler(job):
             actual_duration = float(probe.stdout.strip()) if probe.stdout.strip() else duration
 
             # Upload to Supabase
-            filename = f"{job_id}_{i+1}.mp3"
+            filename = f"ace-{job_id}_{i+1}.mp3"
             url = upload_to_supabase(mp3_path, filename)
             os.unlink(mp3_path)
 
