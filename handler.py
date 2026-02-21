@@ -174,6 +174,16 @@ def handler(job):
     duration = input_data.get("duration", 120)
     num_songs = min(input_data.get("num_songs", 2), 4)
 
+    # Per-request LoRA scale override (from UI slider)
+    request_lora_scale = input_data.get("lora_scale")
+    if request_lora_scale is not None:
+        scale = float(request_lora_scale)
+        dit_handler.set_lora_scale(scale)
+        print(f"[ACE-Step] Using per-request lora_scale={scale}")
+    else:
+        dit_handler.set_lora_scale(LORA_SCALE)
+        print(f"[ACE-Step] Using default lora_scale={LORA_SCALE}")
+
     songs = []
     job_id = job.get("id", str(uuid.uuid4())[:8])
 
