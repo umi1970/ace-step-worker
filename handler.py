@@ -34,7 +34,7 @@ if missing:
     )
 
 LORA_FILENAME = os.environ.get("LORA_FILENAME", "adapter_model.safetensors")
-LORA_SCALE = float(os.environ.get("LORA_SCALE", "0.2"))
+LORA_SCALE = float(os.environ.get("LORA_SCALE", "1.0"))
 LORA_DIR = "/tmp/lora"
 LORA_LOCAL_PATH = os.path.join(LORA_DIR, LORA_FILENAME)
 
@@ -90,6 +90,7 @@ print("[ACE-Step] Loading model (v1.5 API)...")
 load_start = time.time()
 
 from acestep.handler import AceStepHandler
+from acestep.llm_inference import LLMHandler
 from acestep.inference import GenerationParams, GenerationConfig, generate_music
 
 # Step 1: Create DiT handler and initialize the service
@@ -108,6 +109,16 @@ init_status, init_success = dit_handler.initialize_service(
 print(f"[ACE-Step] Init status: {init_status}")
 if not init_success:
     raise RuntimeError(f"Failed to initialize ACE-Step: {init_status}")
+
+# Step 1b: Initialize LLM handler (0.6B model, needed for auto-duration & CoT)
+llm_handler = LLMHandler()
+llm_handler.initialize(
+    checkpoint_dir=PROJECT_ROOT,
+    lm_model_path="acestep-5Hz-lm-0.6B",
+    backend="vllm",
+    device="cuda",
+)
+print(f"[ACE-Step] LLM handler initialized (llm_initialized={llm_handler.llm_initialized})")
 
 # Step 2: Download and load LoRA (MUST succeed — no silent fallback!)
 download_lora()
@@ -171,8 +182,24 @@ def handler(job):
 
     lyrics = input_data.get("lyrics", "")
     caption = input_data.get("caption", "")
-    duration = input_data.get("duration", 120)
+    duration = input_data.get("duration", -1)  # -1 = auto (requires LLM for inference)
     num_songs = min(input_data.get("num_songs", 2), 4)
+
+    # Cover mode parameters
+    task_type = input_data.get("task_type", "text2music")
+    cover_audio_url = input_data.get("cover_audio_url")
+    audio_cover_strength = float(input_data.get("audio_cover_strength", 0.5))
+
+    # Download cover audio from Supabase if cover mode
+    reference_audio_path = None
+    if task_type == "cover" and cover_audio_url:
+        import requests as req
+        print(f"[ACE-Step] Downloading cover audio from {cover_audio_url[:80]}...")
+        resp = req.get(cover_audio_url)
+        reference_audio_path = f"/tmp/cover_{uuid.uuid4().hex[:8]}.mp3"
+        with open(reference_audio_path, "wb") as f:
+            f.write(resp.content)
+        print(f"[ACE-Step] Cover audio downloaded: {len(resp.content)} bytes")
 
     # Per-request LoRA scale override (from UI slider)
     request_lora_scale = input_data.get("lora_scale")
@@ -198,7 +225,7 @@ def handler(job):
             # Build generation parameters (v1.5 dataclass API)
             seed = int(time.time() * 1000 + i) % (2**31)
             params = GenerationParams(
-                task_type="text2music",
+                task_type=task_type,
                 caption=caption,
                 lyrics=lyrics,
                 duration=float(duration),
@@ -208,6 +235,7 @@ def handler(job):
                 seed=seed,
                 shift=3.0,            # Recommended for turbo
                 infer_method="ode",   # Deterministic, faster
+                **({"reference_audio": reference_audio_path, "audio_cover_strength": audio_cover_strength} if reference_audio_path else {}),
             )
 
             config = GenerationConfig(
@@ -216,10 +244,10 @@ def handler(job):
             )
 
             # Generate using v1.5 inference API
-            # llm_handler=None means no LM chain-of-thought (DiT-only, faster)
+            # LLM handler enables Chain-of-Thought for auto-duration & metadata
             result = generate_music(
                 dit_handler=dit_handler,
-                llm_handler=None,
+                llm_handler=llm_handler,
                 params=params,
                 config=config,
                 save_dir=save_dir,
@@ -280,6 +308,11 @@ def handler(job):
                 "duration": 0,
                 "error": str(e),
             })
+
+    # Cleanup temp cover audio file
+    if reference_audio_path and os.path.exists(reference_audio_path):
+        os.unlink(reference_audio_path)
+        print("[ACE-Step] Cleaned up temp cover audio file")
 
     return {"songs": songs}
 
