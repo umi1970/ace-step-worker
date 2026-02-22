@@ -21,6 +21,10 @@ RUN uv sync
 # Install RunPod + Supabase into the uv environment
 RUN uv pip install runpod>=1.7.0 supabase>=2.0.0
 
+# Pre-download LLM model (0.6B, needed for auto-duration & CoT)
+RUN uv pip install huggingface_hub && \
+    uv run python -c "from huggingface_hub import snapshot_download; snapshot_download('ACE-Step/acestep-5Hz-lm-0.6B', local_dir='/app/ace-step-repo/checkpoints/acestep-5Hz-lm-0.6B')"
+
 # Copy handler
 COPY handler.py /app/handler.py
 
