@@ -36,7 +36,8 @@ if missing:
 LORA_FILENAME = os.environ.get("LORA_FILENAME", "adapter_model.safetensors")
 LORA_SCALE = float(os.environ.get("LORA_SCALE", "1.0"))
 LORA_DIR = "/tmp/lora"
-LORA_LOCAL_PATH = os.path.join(LORA_DIR, LORA_FILENAME)
+LORA_ADAPTER_DIR = os.path.join(LORA_DIR, "adapter")  # load_lora expects adapter/ subdir
+LORA_LOCAL_PATH = os.path.join(LORA_ADAPTER_DIR, LORA_FILENAME)
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
@@ -60,9 +61,9 @@ def download_lora():
     Uses a version.txt file in the bucket to detect LoRA updates.
     If the remote version differs from the cached version, re-downloads everything.
     """
-    os.makedirs(LORA_DIR, exist_ok=True)
+    os.makedirs(LORA_ADAPTER_DIR, exist_ok=True)
 
-    config_path = os.path.join(LORA_DIR, "adapter_config.json")
+    config_path = os.path.join(LORA_ADAPTER_DIR, "adapter_config.json")
     version_path = os.path.join(LORA_DIR, "version.txt")
 
     # Check remote version to detect LoRA updates
@@ -162,6 +163,8 @@ if not llm_handler.llm_initialized:
 download_lora()
 
 print(f"[ACE-Step] Loading LoRA from {LORA_DIR} (scale={LORA_SCALE})")
+print(f"[ACE-Step] LoRA dir contents: {os.listdir(LORA_DIR)}")
+print(f"[ACE-Step] LoRA adapter dir contents: {os.listdir(LORA_ADAPTER_DIR)}")
 lora_msg = dit_handler.load_lora(LORA_DIR)
 print(f"[ACE-Step] LoRA load result: {lora_msg}")
 
