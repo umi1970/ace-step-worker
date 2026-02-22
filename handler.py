@@ -234,10 +234,19 @@ def handler(job):
         import requests as req
         print(f"[ACE-Step] Downloading cover audio from {cover_audio_url[:80]}...")
         resp = req.get(cover_audio_url)
-        reference_audio_path = f"/tmp/cover_{uuid.uuid4().hex[:8]}.mp3"
-        with open(reference_audio_path, "wb") as f:
+        tmp_dl = f"/tmp/cover_{uuid.uuid4().hex[:8]}_dl.mp3"
+        with open(tmp_dl, "wb") as f:
             f.write(resp.content)
         print(f"[ACE-Step] Cover audio downloaded: {len(resp.content)} bytes")
+
+        # Convert to WAV — torchaudio.load() may fail on certain MP3 encodings
+        reference_audio_path = tmp_dl.replace("_dl.mp3", ".wav")
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", tmp_dl, "-ar", "48000", "-ac", "2", reference_audio_path],
+            capture_output=True, check=True,
+        )
+        os.unlink(tmp_dl)
+        print(f"[ACE-Step] Cover audio converted to WAV for torchaudio")
 
     # Per-request LoRA scale override (from UI slider)
     request_lora_scale = input_data.get("lora_scale")
