@@ -146,13 +146,17 @@ if not init_success:
 
 # Step 1b: Initialize LLM handler (0.6B model, needed for auto-duration & CoT)
 llm_handler = LLMHandler()
-llm_handler.initialize(
+llm_status, llm_success = llm_handler.initialize(
     checkpoint_dir=PROJECT_ROOT,
     lm_model_path="acestep-5Hz-lm-0.6B",
     backend="vllm",
     device="cuda",
 )
-print(f"[ACE-Step] LLM handler initialized (llm_initialized={llm_handler.llm_initialized})")
+print(f"[ACE-Step] LLM init status: {llm_status}")
+print(f"[ACE-Step] LLM init success: {llm_success}, llm_initialized={llm_handler.llm_initialized}")
+if not llm_handler.llm_initialized:
+    print("[ACE-Step] WARNING: LLM failed to initialize! Duration auto-detection will NOT work.")
+    print("[ACE-Step] Songs will default to 30 seconds without LLM.")
 
 # Step 2: Download and load LoRA (MUST succeed — no silent fallback!)
 download_lora()
