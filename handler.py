@@ -55,13 +55,37 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 # Download LoRA from Supabase at cold start
 # ---------------------------------------------------------------------------
 def download_lora():
-    """Download LoRA weights + config from Supabase ace-lora bucket."""
+    """Download LoRA weights + config from Supabase ace-lora bucket.
+
+    Uses a version.txt file in the bucket to detect LoRA updates.
+    If the remote version differs from the cached version, re-downloads everything.
+    """
     os.makedirs(LORA_DIR, exist_ok=True)
 
     config_path = os.path.join(LORA_DIR, "adapter_config.json")
+    version_path = os.path.join(LORA_DIR, "version.txt")
+
+    # Check remote version to detect LoRA updates
+    needs_download = not os.path.exists(LORA_LOCAL_PATH)
+    remote_version = None
+
+    try:
+        remote_version = supabase.storage.from_(LORA_BUCKET).download("version.txt").decode("utf-8").strip()
+        local_version = None
+        if os.path.exists(version_path):
+            with open(version_path, "r") as f:
+                local_version = f.read().strip()
+
+        if remote_version != local_version:
+            print(f"[ACE-Step] LoRA version changed: '{local_version}' -> '{remote_version}' — re-downloading")
+            needs_download = True
+        else:
+            print(f"[ACE-Step] LoRA version matches: '{remote_version}'")
+    except Exception as e:
+        print(f"[ACE-Step] No version.txt in bucket (ok, using file-exists check): {e}")
 
     # Download adapter_model.safetensors
-    if not os.path.exists(LORA_LOCAL_PATH):
+    if needs_download:
         print(f"[ACE-Step] Downloading LoRA '{LORA_FILENAME}' from Supabase...")
         dl_start = time.time()
         data = supabase.storage.from_(LORA_BUCKET).download(LORA_FILENAME)
@@ -69,18 +93,28 @@ def download_lora():
             f.write(data)
         print(f"[ACE-Step] LoRA weights downloaded in {time.time() - dl_start:.1f}s "
               f"({len(data) / 1024 / 1024:.1f}MB)")
-    else:
-        print(f"[ACE-Step] LoRA weights already cached at {LORA_LOCAL_PATH}")
 
-    # Download adapter_config.json (v1.5 REQUIRES this file!)
-    if not os.path.exists(config_path):
+        # Download adapter_config.json (v1.5 REQUIRES this file!)
         print("[ACE-Step] Downloading adapter_config.json from Supabase...")
         config_data = supabase.storage.from_(LORA_BUCKET).download("adapter_config.json")
         with open(config_path, "wb") as f:
             f.write(config_data)
         print("[ACE-Step] adapter_config.json downloaded")
+
+        # Save version marker
+        if remote_version:
+            with open(version_path, "w") as f:
+                f.write(remote_version)
+            print(f"[ACE-Step] Version marker saved: '{remote_version}'")
     else:
-        print("[ACE-Step] adapter_config.json already cached")
+        print(f"[ACE-Step] LoRA weights already cached at {LORA_LOCAL_PATH}")
+        # Still ensure config exists
+        if not os.path.exists(config_path):
+            print("[ACE-Step] Downloading adapter_config.json from Supabase...")
+            config_data = supabase.storage.from_(LORA_BUCKET).download("adapter_config.json")
+            with open(config_path, "wb") as f:
+                f.write(config_data)
+            print("[ACE-Step] adapter_config.json downloaded")
 
 
 # ---------------------------------------------------------------------------
