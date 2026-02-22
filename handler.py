@@ -9,7 +9,7 @@ Generates audio, uploads to Supabase Storage, returns URLs.
 Env vars (set in RunPod Template):
   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
   LORA_FILENAME (default: adapter_model.safetensors)
-  LORA_SCALE (default: 0.2)
+  LORA_SCALE (default: 0.45)
 """
 
 import os
@@ -34,7 +34,7 @@ if missing:
     )
 
 LORA_FILENAME = os.environ.get("LORA_FILENAME", "adapter_model.safetensors")
-LORA_SCALE = float(os.environ.get("LORA_SCALE", "1.0"))
+LORA_SCALE = float(os.environ.get("LORA_SCALE", "0.45"))
 LORA_DIR = "/tmp/lora"
 LORA_LOCAL_PATH = os.path.join(LORA_DIR, LORA_FILENAME)
 
@@ -223,30 +223,34 @@ def handler(job):
     duration = input_data.get("duration", -1)  # -1 = auto (requires LLM for inference)
     num_songs = min(input_data.get("num_songs", 2), 4)
 
-    # Cover mode parameters
+    # Cover mode parameters (verified from Gradio testing)
     task_type = input_data.get("task_type", "text2music")
     cover_audio_url = input_data.get("cover_audio_url")
-    audio_cover_strength = float(input_data.get("audio_cover_strength", 0.5))
+    audio_cover_strength = float(input_data.get("audio_cover_strength", 0.06))
+    cover_noise_strength = float(input_data.get("cover_noise_strength", 0.1))
 
-    # Download cover audio from Supabase if cover mode
-    reference_audio_path = None
+    # Download cover source audio from Supabase if cover mode
+    # IMPORTANT: Cover/Remix uses `src_audio` (NOT `reference_audio`!)
+    # reference_audio = style reference for Custom mode only
+    # src_audio = the song to cover/remix
+    src_audio_path = None
     if task_type == "cover" and cover_audio_url:
         import requests as req
-        print(f"[ACE-Step] Downloading cover audio from {cover_audio_url[:80]}...")
+        print(f"[ACE-Step] Downloading cover source audio from {cover_audio_url[:80]}...")
         resp = req.get(cover_audio_url)
         tmp_dl = f"/tmp/cover_{uuid.uuid4().hex[:8]}_dl.mp3"
         with open(tmp_dl, "wb") as f:
             f.write(resp.content)
-        print(f"[ACE-Step] Cover audio downloaded: {len(resp.content)} bytes")
+        print(f"[ACE-Step] Cover source audio downloaded: {len(resp.content)} bytes")
 
         # Convert to WAV — torchaudio.load() may fail on certain MP3 encodings
-        reference_audio_path = tmp_dl.replace("_dl.mp3", ".wav")
+        src_audio_path = tmp_dl.replace("_dl.mp3", ".wav")
         subprocess.run(
-            ["ffmpeg", "-y", "-i", tmp_dl, "-ar", "48000", "-ac", "2", reference_audio_path],
+            ["ffmpeg", "-y", "-i", tmp_dl, "-ar", "48000", "-ac", "2", src_audio_path],
             capture_output=True, check=True,
         )
         os.unlink(tmp_dl)
-        print(f"[ACE-Step] Cover audio converted to WAV for torchaudio")
+        print(f"[ACE-Step] Cover source audio converted to WAV for torchaudio")
 
     # Per-request LoRA scale override (from UI slider)
     request_lora_scale = input_data.get("lora_scale")
@@ -276,13 +280,15 @@ def handler(job):
                 caption=caption,
                 lyrics=lyrics,
                 duration=float(duration),
-                vocal_language="tr",  # Turkish LoRA
                 inference_steps=8,    # Turbo model = 8 steps
-                guidance_scale=7.0,
+                guidance_scale=3.0,   # Verified from Gradio testing
                 seed=seed,
                 shift=3.0,            # Recommended for turbo
                 infer_method="ode",   # Deterministic, faster
-                **({"reference_audio": reference_audio_path, "audio_cover_strength": audio_cover_strength} if reference_audio_path else {}),
+                # Cover/Remix: src_audio is the song to cover (NOT reference_audio!)
+                **({"src_audio": src_audio_path,
+                    "audio_cover_strength": audio_cover_strength,
+                    "cover_noise_strength": cover_noise_strength} if src_audio_path else {}),
             )
 
             config = GenerationConfig(
@@ -356,10 +362,10 @@ def handler(job):
                 "error": str(e),
             })
 
-    # Cleanup temp cover audio file
-    if reference_audio_path and os.path.exists(reference_audio_path):
-        os.unlink(reference_audio_path)
-        print("[ACE-Step] Cleaned up temp cover audio file")
+    # Cleanup temp cover source audio file
+    if src_audio_path and os.path.exists(src_audio_path):
+        os.unlink(src_audio_path)
+        print("[ACE-Step] Cleaned up temp cover source audio file")
 
     return {"songs": songs}
 
