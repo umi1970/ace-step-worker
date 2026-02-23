@@ -22,8 +22,11 @@ RUN uv sync
 RUN uv pip install runpod>=1.7.0 supabase>=2.0.0
 
 # Pre-download LLM model (1.7B, needed for auto-duration & CoT)
+# 1.7B is a subfolder of the main Ace-Step1.5 repo, not a standalone repo
 RUN uv pip install huggingface_hub && \
-    uv run python -c "from huggingface_hub import snapshot_download; snapshot_download('ACE-Step/acestep-5Hz-lm-1.7B', local_dir='/app/ace-step-repo/acestep-5Hz-lm-1.7B')"
+    uv run python -c "from huggingface_hub import snapshot_download; snapshot_download('ACE-Step/Ace-Step1.5', local_dir='/tmp/ace-step-full', allow_patterns='acestep-5Hz-lm-1.7B/*')" && \
+    mv /tmp/ace-step-full/acestep-5Hz-lm-1.7B /app/ace-step-repo/acestep-5Hz-lm-1.7B && \
+    rm -rf /tmp/ace-step-full
 
 # Copy handler
 COPY handler.py /app/handler.py
