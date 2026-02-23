@@ -148,7 +148,7 @@ if not init_success:
 llm_handler = LLMHandler()
 llm_status, llm_success = llm_handler.initialize(
     checkpoint_dir=PROJECT_ROOT,
-    lm_model_path="acestep-5Hz-lm-0.6B",
+    lm_model_path="acestep-5Hz-lm-1.7B",
     backend="vllm",
     device="cuda",
 )
