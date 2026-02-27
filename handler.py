@@ -177,6 +177,29 @@ print(f"[ACE-Step] Model loaded in {time.time() - load_start:.1f}s")
 
 
 # ---------------------------------------------------------------------------
+# Quality Check — reject broken songs (cold-start artifacts, noise)
+# ---------------------------------------------------------------------------
+MAX_DURATION_HARD_CAP = 420  # 7 min absolute maximum
+MAX_DURATION_AUTO = 360      # 6 min for auto-duration mode
+
+
+def check_song_quality(actual_duration, requested_duration):
+    """Check if generated song duration is within acceptable bounds.
+
+    Returns (is_valid, reason).
+    """
+    if actual_duration > MAX_DURATION_HARD_CAP:
+        return False, f"Duration {actual_duration:.1f}s exceeds hard cap {MAX_DURATION_HARD_CAP}s"
+    if requested_duration > 0:
+        max_allowed = min(requested_duration * 1.5, MAX_DURATION_AUTO)
+        if actual_duration > max_allowed:
+            return False, f"Duration {actual_duration:.1f}s exceeds limit {max_allowed:.0f}s (requested {requested_duration}s)"
+    elif actual_duration > MAX_DURATION_AUTO:
+        return False, f"Duration {actual_duration:.1f}s exceeds auto max {MAX_DURATION_AUTO}s"
+    return True, ""
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 def convert_to_mp3(audio_path: str) -> str:
@@ -339,6 +362,21 @@ def handler(job):
             )
             actual_duration = float(probe.stdout.strip()) if probe.stdout.strip() else duration
 
+            # Quality check — reject broken songs before uploading
+            is_valid, reject_reason = check_song_quality(actual_duration, duration)
+            if not is_valid:
+                print(f"[ACE-Step] Song {i+1} REJECTED: {reject_reason}")
+                os.unlink(mp3_path)
+                songs.append({
+                    "url": None,
+                    "duration": round(actual_duration, 1),
+                    "rejected": True,
+                    "error": reject_reason,
+                })
+                gen_time = time.time() - gen_start
+                print(f"[ACE-Step] Song {i+1} rejected in {gen_time:.1f}s")
+                continue
+
             # Upload to Supabase
             filename = f"ace-{job_id}_{i+1}.mp3"
             url = upload_to_supabase(mp3_path, filename)
@@ -367,7 +405,15 @@ def handler(job):
         os.unlink(src_audio_path)
         print("[ACE-Step] Cleaned up temp cover source audio file")
 
-    return {"songs": songs}
+    valid_count = sum(1 for s in songs if s.get("url"))
+    rejected_count = sum(1 for s in songs if s.get("rejected"))
+    print(f"[ACE-Step] Done: {valid_count} valid, {rejected_count} rejected out of {len(songs)}")
+
+    return {
+        "songs": songs,
+        "valid_count": valid_count,
+        "rejected_count": rejected_count,
+    }
 
 
 runpod.serverless.start({"handler": handler})
