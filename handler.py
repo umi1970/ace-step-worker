@@ -148,7 +148,7 @@ if not init_success:
 llm_handler = LLMHandler()
 llm_status, llm_success = llm_handler.initialize(
     checkpoint_dir=PROJECT_ROOT,
-    lm_model_path="acestep-5Hz-lm-1.7B",
+    lm_model_path="acestep-5Hz-lm-4B",
     backend="vllm",
     device="cuda",
 )
@@ -275,6 +275,13 @@ def handler(job):
         os.unlink(tmp_dl)
         print(f"[ACE-Step] Cover source audio converted to WAV for torchaudio")
 
+    # Generation parameters (from UI or admin defaults)
+    guidance_scale = float(input_data.get("guidance_scale", 3.0))
+    lm_cfg_scale = float(input_data.get("lm_cfg_scale", 2.0))
+    shift_val = float(input_data.get("shift", 3.0))
+    inference_steps = int(input_data.get("inference_steps", 8))
+    print(f"[ACE-Step] Params: cfg={guidance_scale}, lm={lm_cfg_scale}, shift={shift_val}, steps={inference_steps}")
+
     # Per-request LoRA scale override (from UI slider)
     request_lora_scale = input_data.get("lora_scale")
     if request_lora_scale is not None:
@@ -303,10 +310,11 @@ def handler(job):
                 caption=caption,
                 lyrics=lyrics,
                 duration=float(duration),
-                inference_steps=8,    # Turbo model = 8 steps
-                guidance_scale=3.0,   # Verified from Gradio testing
+                inference_steps=inference_steps,
+                guidance_scale=guidance_scale,
+                lm_cfg_scale=lm_cfg_scale,
                 seed=seed,
-                shift=3.0,            # Recommended for turbo
+                shift=shift_val,
                 infer_method="ode",   # Deterministic, faster
                 # Cover/Remix: src_audio is the song to cover (NOT reference_audio!)
                 **({"src_audio": src_audio_path,
