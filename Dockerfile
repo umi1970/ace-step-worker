@@ -20,14 +20,34 @@ WORKDIR /app/ace-step-repo
 RUN uv sync
 
 # Install RunPod + Supabase into the uv environment
-RUN uv pip install runpod>=1.7.0 supabase>=2.0.0
+RUN uv pip install runpod>=1.7.0 supabase>=2.0.0 huggingface_hub
 
-# Pre-download LLM model (4B, needed for auto-duration, CoT & melody copying)
-# 4B is a separate HuggingFace repo (not a subfolder of Ace-Step1.5)
-RUN uv pip install huggingface_hub && \
-    uv run python -c "from huggingface_hub import snapshot_download; snapshot_download('ACE-Step/acestep-5Hz-lm-4B', local_dir='/app/ace-step-repo/acestep-5Hz-lm-4B')"
+# ============================================================================
+# Pre-download ALL models at build time (pins them to Docker image)
+# CRITICAL: Without this, models download at cold start from HuggingFace LATEST
+# which can be incompatible with our pinned code (commit 294256d)!
+# ============================================================================
 
-# Copy handler
+# 1. Main model (turbo DiT + VAE + Qwen3 Embedding + 1.7B LLM)
+#    Downloads from ACE-Step/Ace-Step1.5 HuggingFace repo
+RUN uv run python -c "\
+from acestep.model_downloader import download_main_model; \
+from pathlib import Path; \
+download_main_model(Path('/app/ace-step-repo/checkpoints'))"
+
+# 2. SFT model (for ace-tr-base endpoint)
+RUN uv run python -c "\
+from acestep.model_downloader import download_submodel; \
+from pathlib import Path; \
+download_submodel('acestep-v15-sft', Path('/app/ace-step-repo/checkpoints'))"
+
+# 3. 4B LLM (optional, larger model for better CoT)
+#    Handler uses ACE_LM_MODEL env to select between 1.7B (bundled) and 4B
+RUN uv run python -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('ACE-Step/acestep-5Hz-lm-4B', local_dir='/app/ace-step-repo/checkpoints/acestep-5Hz-lm-4B')"
+
+# Copy handler (last layer for fast rebuilds)
 COPY handler.py /app/handler.py
 
 WORKDIR /app

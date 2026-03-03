@@ -36,18 +36,20 @@ if missing:
 LORA_FILENAME = os.environ.get("LORA_FILENAME", "adapter_model.safetensors")
 LORA_SCALE = float(os.environ.get("LORA_SCALE", "0.45"))
 ACE_MODEL_CONFIG = os.environ.get("ACE_MODEL_CONFIG", "acestep-v15-turbo")
+ACE_LM_MODEL = os.environ.get("ACE_LM_MODEL", "acestep-5Hz-lm-4B")  # 4B (best CoT quality)
 LORA_DIR = "/tmp/lora"
 LORA_LOCAL_PATH = os.path.join(LORA_DIR, LORA_FILENAME)
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 
-print(f"[ACE-Step] Config: SUPABASE_URL={SUPABASE_URL[:30]}..., LORA={LORA_FILENAME}, SCALE={LORA_SCALE}, MODEL_CONFIG={ACE_MODEL_CONFIG}")
+print(f"[ACE-Step] Config: SUPABASE_URL={SUPABASE_URL[:30]}..., LORA={LORA_FILENAME}, SCALE={LORA_SCALE}, MODEL_CONFIG={ACE_MODEL_CONFIG}, LM_MODEL={ACE_LM_MODEL}")
 BUCKET_NAME = "mastered-songs"
 LORA_BUCKET = "ace-lora"
 
 # ACE-Step v1.5 repo is cloned to /app/ace-step-repo by Dockerfile
 PROJECT_ROOT = "/app/ace-step-repo"
+CHECKPOINTS_DIR = os.path.join(PROJECT_ROOT, "checkpoints")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -145,11 +147,11 @@ print(f"[ACE-Step] Init status: {init_status}")
 if not init_success:
     raise RuntimeError(f"Failed to initialize ACE-Step: {init_status}")
 
-# Step 1b: Initialize LLM handler (0.6B model, needed for auto-duration & CoT)
+# Step 1b: Initialize LLM handler (configurable via ACE_LM_MODEL env, default 1.7B)
 llm_handler = LLMHandler()
 llm_status, llm_success = llm_handler.initialize(
-    checkpoint_dir=PROJECT_ROOT,
-    lm_model_path="acestep-5Hz-lm-4B",
+    checkpoint_dir=CHECKPOINTS_DIR,
+    lm_model_path=ACE_LM_MODEL,
     backend="vllm",
     device="cuda",
 )
@@ -323,7 +325,7 @@ def handler(job):
     bpm_raw = input_data.get("bpm")
     bpm = int(bpm_raw) if bpm_raw is not None and str(bpm_raw).strip() else None
     keyscale = input_data.get("keyscale", "")
-    timesignature = input_data.get("timesignature", "4")  # Default 4/4
+    timesignature = input_data.get("timesignature", "")  # Empty = auto via CoT (source default)
     vocal_language = input_data.get("vocal_language", "unknown")
     instrumental = bool(input_data.get("instrumental", False))
 
