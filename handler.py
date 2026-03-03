@@ -283,17 +283,48 @@ def handler(job):
         os.unlink(tmp_dl)
         print(f"[ACE-Step] Cover source audio converted to WAV for torchaudio")
 
-    # Generation parameters (from UI or admin defaults)
+    # Generation parameters — ALL params from GenerationParams, matching Gradio 1:1
+    # (see acestep/gradio_ui/events/results_handlers.py line 617-657)
     guidance_scale = float(input_data.get("guidance_scale", 3.0))
     lm_cfg_scale = float(input_data.get("lm_cfg_scale", 2.0))
     shift_val = float(input_data.get("shift", 3.0))
     inference_steps = int(input_data.get("inference_steps", 8))
-    # Optional tuning params (admin localStorage overrides)
-    lm_temperature = input_data.get("lm_temperature")
-    latent_shift = input_data.get("latent_shift")
-    latent_rescale = input_data.get("latent_rescale")
+    lm_temperature = float(input_data.get("lm_temperature", 0.85))
+    latent_shift = float(input_data.get("latent_shift", 0.0))
+    latent_rescale = float(input_data.get("latent_rescale", 1.0))
+    # DiT advanced
+    use_adg = bool(input_data.get("use_adg", False))
+    cfg_interval_start = float(input_data.get("cfg_interval_start", 0.0))
+    cfg_interval_end = float(input_data.get("cfg_interval_end", 1.0))
+    infer_method = input_data.get("infer_method", "ode")
+    # Custom timesteps (comma-separated string → list of floats)
+    custom_timesteps_str = input_data.get("timesteps", "")
+    parsed_timesteps = None
+    if custom_timesteps_str and str(custom_timesteps_str).strip():
+        try:
+            parsed_timesteps = [float(t.strip()) for t in str(custom_timesteps_str).split(",") if t.strip()]
+            if parsed_timesteps:
+                inference_steps = len(parsed_timesteps) - 1  # Match Gradio behavior
+        except (ValueError, TypeError):
+            parsed_timesteps = None
+    # LM parameters
+    lm_top_k = int(input_data.get("lm_top_k", 0))
+    lm_top_p = float(input_data.get("lm_top_p", 0.9))
+    lm_negative_prompt = input_data.get("lm_negative_prompt", "NO USER INPUT") or "NO USER INPUT"
+    # CoT / Thinking
+    thinking = bool(input_data.get("thinking", True))
+    use_cot_metas = bool(input_data.get("use_cot_metas", True))
+    use_cot_caption = bool(input_data.get("use_cot_caption", True))
+    use_cot_language = bool(input_data.get("use_cot_language", True))
+    # Audio post-processing
+    enable_normalization = bool(input_data.get("enable_normalization", True))
+    normalization_db = float(input_data.get("normalization_db", -1.0))
+
     print(f"[ACE-Step] Params: cfg={guidance_scale}, lm={lm_cfg_scale}, shift={shift_val}, steps={inference_steps}"
-          f", lm_temp={lm_temperature}, lat_shift={latent_shift}, lat_rescale={latent_rescale}")
+          f", lm_temp={lm_temperature}, lat_shift={latent_shift}, lat_rescale={latent_rescale}"
+          f", infer={infer_method}, adg={use_adg}, thinking={thinking}"
+          f", timesteps={'custom' if parsed_timesteps else 'auto'}"
+          f", norm={enable_normalization}, norm_db={normalization_db}")
 
     # Per-request LoRA scale override (from UI slider)
     request_lora_scale = input_data.get("lora_scale")
@@ -317,32 +348,45 @@ def handler(job):
 
         try:
             # Build generation parameters (v1.5 dataclass API)
+            # ALL params match Gradio 1:1 (results_handlers.py line 617-657)
             seed = int(time.time() * 1000 + i) % (2**31)
-            # Build optional kwargs for tuning params
-            extra_params = {}
-            if src_audio_path:
-                extra_params["src_audio"] = src_audio_path
-                extra_params["audio_cover_strength"] = audio_cover_strength
-                extra_params["cover_noise_strength"] = cover_noise_strength
-            if lm_temperature is not None:
-                extra_params["lm_temperature"] = float(lm_temperature)
-            if latent_shift is not None:
-                extra_params["latent_shift"] = float(latent_shift)
-            if latent_rescale is not None:
-                extra_params["latent_rescale"] = float(latent_rescale)
 
             params = GenerationParams(
                 task_type=task_type,
                 caption=caption,
                 lyrics=lyrics,
                 duration=float(duration),
+                seed=seed,
+                # DiT parameters
                 inference_steps=inference_steps,
                 guidance_scale=guidance_scale,
-                lm_cfg_scale=lm_cfg_scale,
-                seed=seed,
                 shift=shift_val,
-                infer_method="ode",   # Deterministic, faster
-                **extra_params,
+                infer_method=infer_method,
+                timesteps=parsed_timesteps,
+                use_adg=use_adg,
+                cfg_interval_start=cfg_interval_start,
+                cfg_interval_end=cfg_interval_end,
+                # LM parameters
+                lm_cfg_scale=lm_cfg_scale,
+                lm_temperature=lm_temperature,
+                lm_top_k=lm_top_k,
+                lm_top_p=lm_top_p,
+                lm_negative_prompt=lm_negative_prompt,
+                # CoT / Thinking
+                thinking=thinking,
+                use_cot_metas=use_cot_metas,
+                use_cot_caption=use_cot_caption,
+                use_cot_language=use_cot_language,
+                use_constrained_decoding=True,
+                # Audio post-processing
+                enable_normalization=enable_normalization,
+                normalization_db=normalization_db,
+                latent_shift=latent_shift,
+                latent_rescale=latent_rescale,
+                # Cover mode
+                **({"src_audio": src_audio_path,
+                    "audio_cover_strength": audio_cover_strength,
+                    "cover_noise_strength": cover_noise_strength} if src_audio_path else {}),
             )
 
             config = GenerationConfig(
