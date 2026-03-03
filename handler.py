@@ -35,13 +35,14 @@ if missing:
 
 LORA_FILENAME = os.environ.get("LORA_FILENAME", "adapter_model.safetensors")
 LORA_SCALE = float(os.environ.get("LORA_SCALE", "0.45"))
+ACE_MODEL_CONFIG = os.environ.get("ACE_MODEL_CONFIG", "acestep-v15-turbo")
 LORA_DIR = "/tmp/lora"
 LORA_LOCAL_PATH = os.path.join(LORA_DIR, LORA_FILENAME)
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 
-print(f"[ACE-Step] Config: SUPABASE_URL={SUPABASE_URL[:30]}..., LORA={LORA_FILENAME}, SCALE={LORA_SCALE}")
+print(f"[ACE-Step] Config: SUPABASE_URL={SUPABASE_URL[:30]}..., LORA={LORA_FILENAME}, SCALE={LORA_SCALE}, MODEL_CONFIG={ACE_MODEL_CONFIG}")
 BUCKET_NAME = "mastered-songs"
 LORA_BUCKET = "ace-lora"
 
@@ -131,7 +132,7 @@ from acestep.inference import GenerationParams, GenerationConfig, generate_music
 dit_handler = AceStepHandler()
 init_status, init_success = dit_handler.initialize_service(
     project_root=PROJECT_ROOT,
-    config_path="acestep-v15-turbo",  # Turbo model (8-step inference)
+    config_path=ACE_MODEL_CONFIG,  # Set via ACE_MODEL_CONFIG env (default: acestep-v15-turbo)
     device="cuda",
     use_flash_attention=False,
     compile_model=False,
@@ -259,12 +260,19 @@ def handler(job):
     src_audio_path = None
     if task_type == "cover" and cover_audio_url:
         import requests as req
-        print(f"[ACE-Step] Downloading cover source audio from {cover_audio_url[:80]}...")
+        print(f"[ACE-Step] Downloading cover source audio from {cover_audio_url}...")
         resp = req.get(cover_audio_url)
+        print(f"[ACE-Step] Cover source audio downloaded: {len(resp.content)} bytes (HTTP {resp.status_code})")
+
+        if resp.status_code != 200 or len(resp.content) < 1000:
+            raise RuntimeError(
+                f"Cover audio download failed: HTTP {resp.status_code}, {len(resp.content)} bytes. "
+                f"URL: {cover_audio_url} | Body: {resp.content[:200]}"
+            )
+
         tmp_dl = f"/tmp/cover_{uuid.uuid4().hex[:8]}_dl.mp3"
         with open(tmp_dl, "wb") as f:
             f.write(resp.content)
-        print(f"[ACE-Step] Cover source audio downloaded: {len(resp.content)} bytes")
 
         # Convert to WAV — torchaudio.load() may fail on certain MP3 encodings
         src_audio_path = tmp_dl.replace("_dl.mp3", ".wav")
@@ -280,7 +288,12 @@ def handler(job):
     lm_cfg_scale = float(input_data.get("lm_cfg_scale", 2.0))
     shift_val = float(input_data.get("shift", 3.0))
     inference_steps = int(input_data.get("inference_steps", 8))
-    print(f"[ACE-Step] Params: cfg={guidance_scale}, lm={lm_cfg_scale}, shift={shift_val}, steps={inference_steps}")
+    # Optional tuning params (admin localStorage overrides)
+    lm_temperature = input_data.get("lm_temperature")
+    latent_shift = input_data.get("latent_shift")
+    latent_rescale = input_data.get("latent_rescale")
+    print(f"[ACE-Step] Params: cfg={guidance_scale}, lm={lm_cfg_scale}, shift={shift_val}, steps={inference_steps}"
+          f", lm_temp={lm_temperature}, lat_shift={latent_shift}, lat_rescale={latent_rescale}")
 
     # Per-request LoRA scale override (from UI slider)
     request_lora_scale = input_data.get("lora_scale")
@@ -305,6 +318,19 @@ def handler(job):
         try:
             # Build generation parameters (v1.5 dataclass API)
             seed = int(time.time() * 1000 + i) % (2**31)
+            # Build optional kwargs for tuning params
+            extra_params = {}
+            if src_audio_path:
+                extra_params["src_audio"] = src_audio_path
+                extra_params["audio_cover_strength"] = audio_cover_strength
+                extra_params["cover_noise_strength"] = cover_noise_strength
+            if lm_temperature is not None:
+                extra_params["lm_temperature"] = float(lm_temperature)
+            if latent_shift is not None:
+                extra_params["latent_shift"] = float(latent_shift)
+            if latent_rescale is not None:
+                extra_params["latent_rescale"] = float(latent_rescale)
+
             params = GenerationParams(
                 task_type=task_type,
                 caption=caption,
@@ -316,10 +342,7 @@ def handler(job):
                 seed=seed,
                 shift=shift_val,
                 infer_method="ode",   # Deterministic, faster
-                # Cover/Remix: src_audio is the song to cover (NOT reference_audio!)
-                **({"src_audio": src_audio_path,
-                    "audio_cover_strength": audio_cover_strength,
-                    "cover_noise_strength": cover_noise_strength} if src_audio_path else {}),
+                **extra_params,
             )
 
             config = GenerationConfig(
