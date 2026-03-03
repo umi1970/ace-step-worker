@@ -29,9 +29,5 @@ RUN uv pip install huggingface_hub && \
 # Copy handler
 COPY handler.py /app/handler.py
 
-# Default env vars (override in RunPod Template)
-ENV LORA_FILENAME=adapter_model.safetensors
-ENV LORA_SCALE=1.0
-
 WORKDIR /app
 CMD ["uv", "run", "--project", "/app/ace-step-repo", "python", "-u", "/app/handler.py"]
