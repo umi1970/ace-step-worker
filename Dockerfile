@@ -11,8 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install uv (the package manager ACE-Step v1.5 uses)
 RUN pip install --no-cache-dir uv
 
-# Clone ACE-Step v1.5 repo
-RUN git clone --recurse-submodules https://github.com/ace-step/ACE-Step-1.5.git /app/ace-step-repo
+# Clone ACE-Step v1.5 repo — pinned to known-good commit (training pod version)
+RUN git clone --recurse-submodules https://github.com/ace-step/ACE-Step-1.5.git /app/ace-step-repo && \
+    cd /app/ace-step-repo && git checkout 294256d
 
 # Install all ACE-Step deps via uv (same as the working RunPod pod)
 WORKDIR /app/ace-step-repo
