@@ -35,13 +35,10 @@ from acestep.model_downloader import download_main_model; \
 from pathlib import Path; \
 download_main_model(Path('/app/ace-step-repo/checkpoints'))"
 
-# 2. SFT model (for ace-tr-base endpoint)
-RUN uv run python -c "\
-from acestep.model_downloader import download_submodel; \
-from pathlib import Path; \
-download_submodel('acestep-v15-sft', Path('/app/ace-step-repo/checkpoints'))"
+# 2. SFT model — NOT pre-downloaded (adds ~3GB, causes build timeout)
+#    Downloaded at cold start by initialize_service() when ACE_MODEL_CONFIG=acestep-v15-sft
 
-# 3. 4B LLM (optional, larger model for better CoT)
+# 3. 4B LLM (best CoT quality)
 #    Handler uses ACE_LM_MODEL env to select between 1.7B (bundled) and 4B
 RUN uv run python -c "\
 from huggingface_hub import snapshot_download; \
