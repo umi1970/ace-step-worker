@@ -319,12 +319,20 @@ def handler(job):
     # Audio post-processing
     enable_normalization = bool(input_data.get("enable_normalization", True))
     normalization_db = float(input_data.get("normalization_db", -1.0))
+    # Music metadata (Gradio passes these — without them, CoT guesses badly!)
+    bpm_raw = input_data.get("bpm")
+    bpm = int(bpm_raw) if bpm_raw is not None and str(bpm_raw).strip() else None
+    keyscale = input_data.get("keyscale", "")
+    timesignature = input_data.get("timesignature", "4")  # Default 4/4
+    vocal_language = input_data.get("vocal_language", "unknown")
+    instrumental = bool(input_data.get("instrumental", False))
 
     print(f"[ACE-Step] Params: cfg={guidance_scale}, lm={lm_cfg_scale}, shift={shift_val}, steps={inference_steps}"
           f", lm_temp={lm_temperature}, lat_shift={latent_shift}, lat_rescale={latent_rescale}"
           f", infer={infer_method}, adg={use_adg}, thinking={thinking}"
           f", timesteps={'custom' if parsed_timesteps else 'auto'}"
-          f", norm={enable_normalization}, norm_db={normalization_db}")
+          f", norm={enable_normalization}, norm_db={normalization_db}"
+          f", bpm={bpm}, key={keyscale}, timesig={timesignature}, lang={vocal_language}")
 
     # Per-request LoRA scale override (from UI slider)
     request_lora_scale = input_data.get("lora_scale")
@@ -355,6 +363,11 @@ def handler(job):
                 task_type=task_type,
                 caption=caption,
                 lyrics=lyrics,
+                instrumental=instrumental,
+                vocal_language=vocal_language,
+                bpm=bpm,
+                keyscale=keyscale,
+                timesignature=timesignature,
                 duration=float(duration),
                 seed=seed,
                 # DiT parameters
