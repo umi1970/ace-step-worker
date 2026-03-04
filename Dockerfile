@@ -35,14 +35,11 @@ from acestep.model_downloader import download_main_model; \
 from pathlib import Path; \
 download_main_model(Path('/app/ace-step-repo/checkpoints'))"
 
-# 2. SFT model — NOT pre-downloaded (adds ~3GB, causes build timeout)
-#    Downloaded at cold start by initialize_service() when ACE_MODEL_CONFIG=acestep-v15-sft
-
-# 3. 4B LLM (best CoT quality)
-#    Handler uses ACE_LM_MODEL env to select between 1.7B (bundled) and 4B
+# 2. 4B LLM (best CoT quality)
+#    Handler uses checkpoint_dir=PROJECT_ROOT, so LLM goes directly in repo root
 RUN uv run python -c "\
 from huggingface_hub import snapshot_download; \
-snapshot_download('ACE-Step/acestep-5Hz-lm-4B', local_dir='/app/ace-step-repo/checkpoints/acestep-5Hz-lm-4B')"
+snapshot_download('ACE-Step/acestep-5Hz-lm-4B', local_dir='/app/ace-step-repo/acestep-5Hz-lm-4B')"
 
 # Copy handler (last layer for fast rebuilds)
 COPY handler.py /app/handler.py

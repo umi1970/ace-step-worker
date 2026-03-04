@@ -35,21 +35,18 @@ if missing:
 
 LORA_FILENAME = os.environ.get("LORA_FILENAME", "adapter_model.safetensors")
 LORA_SCALE = float(os.environ.get("LORA_SCALE", "0.45"))
-ACE_MODEL_CONFIG = os.environ.get("ACE_MODEL_CONFIG", "acestep-v15-turbo")
-ACE_LM_MODEL = os.environ.get("ACE_LM_MODEL", "acestep-5Hz-lm-4B")  # 4B (best CoT quality)
 LORA_DIR = "/tmp/lora"
 LORA_LOCAL_PATH = os.path.join(LORA_DIR, LORA_FILENAME)
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 
-print(f"[ACE-Step] Config: SUPABASE_URL={SUPABASE_URL[:30]}..., LORA={LORA_FILENAME}, SCALE={LORA_SCALE}, MODEL_CONFIG={ACE_MODEL_CONFIG}, LM_MODEL={ACE_LM_MODEL}")
+print(f"[ACE-Step] Config: SUPABASE_URL={SUPABASE_URL[:30]}..., LORA={LORA_FILENAME}, SCALE={LORA_SCALE}")
 BUCKET_NAME = "mastered-songs"
 LORA_BUCKET = "ace-lora"
 
 # ACE-Step v1.5 repo is cloned to /app/ace-step-repo by Dockerfile
 PROJECT_ROOT = "/app/ace-step-repo"
-CHECKPOINTS_DIR = os.path.join(PROJECT_ROOT, "checkpoints")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -134,7 +131,7 @@ from acestep.inference import GenerationParams, GenerationConfig, generate_music
 dit_handler = AceStepHandler()
 init_status, init_success = dit_handler.initialize_service(
     project_root=PROJECT_ROOT,
-    config_path=ACE_MODEL_CONFIG,  # Set via ACE_MODEL_CONFIG env (default: acestep-v15-turbo)
+    config_path="acestep-v15-turbo",  # Turbo model (8-step inference)
     device="cuda",
     use_flash_attention=False,
     compile_model=False,
@@ -147,11 +144,11 @@ print(f"[ACE-Step] Init status: {init_status}")
 if not init_success:
     raise RuntimeError(f"Failed to initialize ACE-Step: {init_status}")
 
-# Step 1b: Initialize LLM handler (configurable via ACE_LM_MODEL env, default 1.7B)
+# Step 1b: Initialize LLM handler (0.6B model, needed for auto-duration & CoT)
 llm_handler = LLMHandler()
 llm_status, llm_success = llm_handler.initialize(
-    checkpoint_dir=CHECKPOINTS_DIR,
-    lm_model_path=ACE_LM_MODEL,
+    checkpoint_dir=PROJECT_ROOT,
+    lm_model_path="acestep-5Hz-lm-4B",
     backend="vllm",
     device="cuda",
 )
@@ -262,19 +259,12 @@ def handler(job):
     src_audio_path = None
     if task_type == "cover" and cover_audio_url:
         import requests as req
-        print(f"[ACE-Step] Downloading cover source audio from {cover_audio_url}...")
+        print(f"[ACE-Step] Downloading cover source audio from {cover_audio_url[:80]}...")
         resp = req.get(cover_audio_url)
-        print(f"[ACE-Step] Cover source audio downloaded: {len(resp.content)} bytes (HTTP {resp.status_code})")
-
-        if resp.status_code != 200 or len(resp.content) < 1000:
-            raise RuntimeError(
-                f"Cover audio download failed: HTTP {resp.status_code}, {len(resp.content)} bytes. "
-                f"URL: {cover_audio_url} | Body: {resp.content[:200]}"
-            )
-
         tmp_dl = f"/tmp/cover_{uuid.uuid4().hex[:8]}_dl.mp3"
         with open(tmp_dl, "wb") as f:
             f.write(resp.content)
+        print(f"[ACE-Step] Cover source audio downloaded: {len(resp.content)} bytes")
 
         # Convert to WAV — torchaudio.load() may fail on certain MP3 encodings
         src_audio_path = tmp_dl.replace("_dl.mp3", ".wav")
@@ -285,89 +275,12 @@ def handler(job):
         os.unlink(tmp_dl)
         print(f"[ACE-Step] Cover source audio converted to WAV for torchaudio")
 
-    # -----------------------------------------------------------------------
-    # DIAGNOSTIC: Log raw input keys to see exactly what frontend sends
-    # -----------------------------------------------------------------------
-    input_keys = sorted(input_data.keys())
-    print(f"[ACE-Step] Raw input keys: {input_keys}")
-
-    # Core generation parameters (always read from request)
+    # Generation parameters (from UI or admin defaults)
     guidance_scale = float(input_data.get("guidance_scale", 3.0))
     lm_cfg_scale = float(input_data.get("lm_cfg_scale", 2.0))
     shift_val = float(input_data.get("shift", 3.0))
     inference_steps = int(input_data.get("inference_steps", 8))
-
-    # Extended parameters — ONLY applied when use_all_params=true
-    # Default: use dataclass defaults (same as old working handler)
-    use_all_params = bool(input_data.get("use_all_params", False))
-
-    if use_all_params:
-        lm_temperature = float(input_data.get("lm_temperature", 0.85))
-        latent_shift = float(input_data.get("latent_shift", 0.0))
-        latent_rescale = float(input_data.get("latent_rescale", 1.0))
-        use_adg = bool(input_data.get("use_adg", False))
-        cfg_interval_start = float(input_data.get("cfg_interval_start", 0.0))
-        cfg_interval_end = float(input_data.get("cfg_interval_end", 1.0))
-        infer_method = input_data.get("infer_method", "ode")
-        custom_timesteps_str = input_data.get("timesteps", "")
-        parsed_timesteps = None
-        if custom_timesteps_str and str(custom_timesteps_str).strip():
-            try:
-                parsed_timesteps = [float(t.strip()) for t in str(custom_timesteps_str).split(",") if t.strip()]
-                if parsed_timesteps:
-                    inference_steps = len(parsed_timesteps) - 1
-            except (ValueError, TypeError):
-                parsed_timesteps = None
-        lm_top_k = int(input_data.get("lm_top_k", 0))
-        lm_top_p = float(input_data.get("lm_top_p", 0.9))
-        lm_negative_prompt = input_data.get("lm_negative_prompt", "NO USER INPUT") or "NO USER INPUT"
-        thinking = bool(input_data.get("thinking", True))
-        use_cot_metas = bool(input_data.get("use_cot_metas", True))
-        use_cot_caption = bool(input_data.get("use_cot_caption", True))
-        use_cot_language = bool(input_data.get("use_cot_language", True))
-        enable_normalization = bool(input_data.get("enable_normalization", True))
-        normalization_db = float(input_data.get("normalization_db", -1.0))
-        bpm_raw = input_data.get("bpm")
-        bpm = int(bpm_raw) if bpm_raw is not None and str(bpm_raw).strip() else None
-        keyscale = input_data.get("keyscale", "")
-        timesignature = input_data.get("timesignature", "")
-        vocal_language = input_data.get("vocal_language", "unknown")
-        instrumental = bool(input_data.get("instrumental", False))
-        print(f"[ACE-Step] MODE: use_all_params=True — ALL params from request")
-    else:
-        # MINIMAL MODE: use dataclass defaults for everything except core 4 params
-        # This matches the old working handler behavior
-        lm_temperature = 0.85
-        latent_shift = 0.0
-        latent_rescale = 1.0
-        use_adg = False
-        cfg_interval_start = 0.0
-        cfg_interval_end = 1.0
-        infer_method = "ode"
-        parsed_timesteps = None
-        lm_top_k = 0
-        lm_top_p = 0.9
-        lm_negative_prompt = "NO USER INPUT"
-        thinking = True
-        use_cot_metas = True
-        use_cot_caption = True
-        use_cot_language = True
-        enable_normalization = True
-        normalization_db = -1.0
-        bpm = None
-        keyscale = ""
-        timesignature = ""  # IMPORTANT: empty = CoT decides (dataclass default)
-        vocal_language = "unknown"
-        instrumental = False
-        print(f"[ACE-Step] MODE: MINIMAL — only core 4 params from request, rest = dataclass defaults")
-
-    print(f"[ACE-Step] Params: cfg={guidance_scale}, lm={lm_cfg_scale}, shift={shift_val}, steps={inference_steps}"
-          f", lm_temp={lm_temperature}, lat_shift={latent_shift}, lat_rescale={latent_rescale}"
-          f", infer={infer_method}, adg={use_adg}, thinking={thinking}"
-          f", timesteps={'custom' if parsed_timesteps else 'auto'}"
-          f", norm={enable_normalization}, norm_db={normalization_db}"
-          f", bpm={bpm}, key={keyscale}, timesig={timesignature}, lang={vocal_language}"
-          f", instrumental={instrumental}")
+    print(f"[ACE-Step] Params: cfg={guidance_scale}, lm={lm_cfg_scale}, shift={shift_val}, steps={inference_steps}")
 
     # Per-request LoRA scale override (from UI slider)
     request_lora_scale = input_data.get("lora_scale")
@@ -392,64 +305,22 @@ def handler(job):
         try:
             # Build generation parameters (v1.5 dataclass API)
             seed = int(time.time() * 1000 + i) % (2**31)
-
-            if use_all_params:
-                # FULL MODE: set ALL params explicitly
-                params = GenerationParams(
-                    task_type=task_type,
-                    caption=caption,
-                    lyrics=lyrics,
-                    instrumental=instrumental,
-                    vocal_language=vocal_language,
-                    bpm=bpm,
-                    keyscale=keyscale,
-                    timesignature=timesignature,
-                    duration=float(duration),
-                    seed=seed,
-                    inference_steps=inference_steps,
-                    guidance_scale=guidance_scale,
-                    shift=shift_val,
-                    infer_method=infer_method,
-                    timesteps=parsed_timesteps,
-                    use_adg=use_adg,
-                    cfg_interval_start=cfg_interval_start,
-                    cfg_interval_end=cfg_interval_end,
-                    lm_cfg_scale=lm_cfg_scale,
-                    lm_temperature=lm_temperature,
-                    lm_top_k=lm_top_k,
-                    lm_top_p=lm_top_p,
-                    lm_negative_prompt=lm_negative_prompt,
-                    thinking=thinking,
-                    use_cot_metas=use_cot_metas,
-                    use_cot_caption=use_cot_caption,
-                    use_cot_language=use_cot_language,
-                    use_constrained_decoding=True,
-                    enable_normalization=enable_normalization,
-                    normalization_db=normalization_db,
-                    latent_shift=latent_shift,
-                    latent_rescale=latent_rescale,
-                    **({"src_audio": src_audio_path,
-                        "audio_cover_strength": audio_cover_strength,
-                        "cover_noise_strength": cover_noise_strength} if src_audio_path else {}),
-                )
-            else:
-                # MINIMAL MODE: only set essential params, rest = dataclass defaults
-                # This matches the old working handler (pre parameter-additions)
-                params = GenerationParams(
-                    task_type=task_type,
-                    caption=caption,
-                    lyrics=lyrics,
-                    duration=float(duration),
-                    inference_steps=inference_steps,
-                    guidance_scale=guidance_scale,
-                    lm_cfg_scale=lm_cfg_scale,
-                    seed=seed,
-                    shift=shift_val,
-                    infer_method="ode",
-                    **({"src_audio": src_audio_path,
-                        "audio_cover_strength": audio_cover_strength,
-                        "cover_noise_strength": cover_noise_strength} if src_audio_path else {}),
-                )
+            params = GenerationParams(
+                task_type=task_type,
+                caption=caption,
+                lyrics=lyrics,
+                duration=float(duration),
+                inference_steps=inference_steps,
+                guidance_scale=guidance_scale,
+                lm_cfg_scale=lm_cfg_scale,
+                seed=seed,
+                shift=shift_val,
+                infer_method="ode",   # Deterministic, faster
+                # Cover/Remix: src_audio is the song to cover (NOT reference_audio!)
+                **({"src_audio": src_audio_path,
+                    "audio_cover_strength": audio_cover_strength,
+                    "cover_noise_strength": cover_noise_strength} if src_audio_path else {}),
+            )
 
             config = GenerationConfig(
                 batch_size=1,
@@ -550,18 +421,6 @@ def handler(job):
         "songs": songs,
         "valid_count": valid_count,
         "rejected_count": rejected_count,
-        # Diagnostic info — visible in RunPod response
-        "diag": {
-            "llm_initialized": llm_handler.llm_initialized if llm_handler else False,
-            "llm_backend": getattr(llm_handler, 'llm_backend', None),
-            "lora_loaded": dit_handler.lora_loaded,
-            "use_lora": dit_handler.use_lora,
-            "lora_scale": dit_handler.lora_scale,
-            "model_config": ACE_MODEL_CONFIG,
-            "lm_model": ACE_LM_MODEL,
-            "use_all_params": use_all_params,
-            "input_keys": input_keys,
-        },
     }
 
 
