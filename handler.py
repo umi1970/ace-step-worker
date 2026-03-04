@@ -203,10 +203,14 @@ def check_song_quality(actual_duration, requested_duration):
 # Helpers
 # ---------------------------------------------------------------------------
 def convert_to_mp3(audio_path: str) -> str:
-    """Convert any audio file to MP3 using ffmpeg."""
+    """Convert any audio file to MP3 using ffmpeg with loudness normalization."""
     mp3_path = os.path.splitext(audio_path)[0] + ".mp3"
     subprocess.run(
-        ["ffmpeg", "-y", "-i", audio_path, "-b:a", "320k", "-q:a", "0", mp3_path],
+        [
+            "ffmpeg", "-y", "-i", audio_path,
+            "-af", "loudnorm=I=-14:TP=-1:LRA=11",
+            "-b:a", "320k", "-q:a", "0", mp3_path,
+        ],
         capture_output=True,
         check=True,
     )
