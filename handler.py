@@ -280,10 +280,10 @@ def handler(job):
         print(f"[ACE-Step] Cover source audio converted to WAV for torchaudio")
 
     # Generation parameters (from UI or admin defaults)
-    guidance_scale = float(input_data.get("guidance_scale", 3.0))
-    lm_cfg_scale = float(input_data.get("lm_cfg_scale", 2.0))
-    shift_val = float(input_data.get("shift", 3.0))
-    inference_steps = int(input_data.get("inference_steps", 8))
+    guidance_scale = float(input_data.get("guidance_scale", 6.5))
+    lm_cfg_scale = float(input_data.get("lm_cfg_scale", 1.6))
+    shift_val = float(input_data.get("shift", 1.0))
+    inference_steps = int(input_data.get("inference_steps", 60))
     print(f"[ACE-Step] Params: cfg={guidance_scale}, lm={lm_cfg_scale}, shift={shift_val}, steps={inference_steps}")
 
     # Per-request LoRA scale override (from UI slider)
