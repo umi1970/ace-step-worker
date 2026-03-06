@@ -131,7 +131,7 @@ from acestep.inference import GenerationParams, GenerationConfig, generate_music
 dit_handler = AceStepHandler()
 init_status, init_success = dit_handler.initialize_service(
     project_root=PROJECT_ROOT,
-    config_path="acestep-v15-turbo",  # Turbo model (8-step inference)
+    config_path=os.environ.get("ACE_MODEL_CONFIG", "acestep-v15-sft"),
     device="cuda",
     use_flash_attention=False,
     compile_model=False,
@@ -144,7 +144,7 @@ print(f"[ACE-Step] Init status: {init_status}")
 if not init_success:
     raise RuntimeError(f"Failed to initialize ACE-Step: {init_status}")
 
-# Step 1b: Initialize LLM handler (0.6B model, needed for auto-duration & CoT)
+# Step 1b: Initialize LLM handler (4B model, needed for auto-duration & CoT)
 llm_handler = LLMHandler()
 llm_status, llm_success = llm_handler.initialize(
     checkpoint_dir=PROJECT_ROOT,
