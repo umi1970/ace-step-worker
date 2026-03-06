@@ -11,9 +11,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install uv (the package manager ACE-Step v1.5 uses)
 RUN pip install --no-cache-dir uv
 
-# Clone ACE-Step v1.5 repo — pinned to known-good commit (training pod version)
+# Clone ACE-Step v1.5 repo — pinned to 45d9783 (SFT support + multi-LoRA + LoRA UUID fix)
 RUN git clone --recurse-submodules https://github.com/ace-step/ACE-Step-1.5.git /app/ace-step-repo && \
-    cd /app/ace-step-repo && git checkout 294256d
+    cd /app/ace-step-repo && git checkout 45d9783
 
 # Install all ACE-Step deps via uv (same as the working RunPod pod)
 WORKDIR /app/ace-step-repo
@@ -23,20 +23,21 @@ RUN uv sync
 RUN uv pip install runpod>=1.7.0 supabase>=2.0.0 huggingface_hub
 
 # ============================================================================
-# Pre-download ALL models at build time (pins them to Docker image)
-# CRITICAL: Without this, models download at cold start from HuggingFace LATEST
-# which can be incompatible with our pinned code (commit 294256d)!
+# Pre-download ALL models at build time (no cold-start downloads)
 # ============================================================================
 
-# 1. Main model (turbo DiT + VAE + Qwen3 Embedding + 1.7B LLM)
-#    Downloads from ACE-Step/Ace-Step1.5 HuggingFace repo
+# 1. Main model (VAE + Qwen3 Embedding — shared by turbo and SFT)
 RUN uv run python -c "\
 from acestep.model_downloader import download_main_model; \
 from pathlib import Path; \
 download_main_model(Path('/app/ace-step-repo/checkpoints'))"
 
-# 2. 4B LLM (best CoT quality)
-#    Handler uses checkpoint_dir=PROJECT_ROOT, so LLM goes directly in repo root
+# 2. SFT DiT model (primary model)
+RUN uv run python -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('ACE-Step/acestep-v15-sft', local_dir='/app/ace-step-repo/checkpoints/acestep-v15-sft')"
+
+# 3. 4B LLM (best CoT quality)
 RUN uv run python -c "\
 from huggingface_hub import snapshot_download; \
 snapshot_download('ACE-Step/acestep-5Hz-lm-4B', local_dir='/app/ace-step-repo/acestep-5Hz-lm-4B')"
