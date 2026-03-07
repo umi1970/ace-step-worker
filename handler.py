@@ -393,12 +393,37 @@ def handler(job):
                 caption=caption,
                 lyrics=lyrics,
                 duration=float(duration),
+                # DiT params
                 inference_steps=inference_steps,
                 guidance_scale=guidance_scale,
-                lm_cfg_scale=lm_cfg_scale,
-                seed=seed,
                 shift=shift_val,
-                infer_method="ode",   # Deterministic, faster
+                infer_method=infer_method,
+                use_adg=use_adg,
+                cfg_interval_start=cfg_interval_start,
+                cfg_interval_end=cfg_interval_end,
+                latent_shift=latent_shift,
+                latent_rescale=latent_rescale,
+                seed=seed,
+                **({"timesteps": custom_timesteps} if custom_timesteps else {}),
+                # LM params
+                lm_cfg_scale=lm_cfg_scale,
+                lm_temperature=lm_temperature,
+                lm_top_k=lm_top_k,
+                lm_top_p=lm_top_p,
+                lm_negative_prompt=lm_negative_prompt,
+                # CoT / Thinking
+                thinking=thinking,
+                use_cot_metas=use_cot_metas,
+                use_cot_caption=use_cot_caption,
+                use_cot_language=use_cot_language,
+                # Normalization OFF — ffmpeg loudnorm handles this
+                enable_normalization=False,
+                # Music metadata
+                **({"bpm": int(bpm_val)} if bpm_val is not None else {}),
+                keyscale=keyscale,
+                timesignature=timesignature,
+                vocal_language=vocal_language,
+                instrumental=instrumental,
                 # Cover/Remix: src_audio is the song to cover (NOT reference_audio!)
                 **({"src_audio": src_audio_path,
                     "audio_cover_strength": audio_cover_strength,
