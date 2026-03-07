@@ -202,13 +202,37 @@ def check_song_quality(actual_duration, requested_duration):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def convert_to_mp3(audio_path: str) -> str:
-    """Convert any audio file to MP3 using ffmpeg with loudness normalization."""
+def convert_to_mp3(audio_path: str, loudnorm_i: float = -14.0, loudnorm_tp: float = -1.0,
+                   loudnorm_lra: float = 11.0, eq_bass: float = 0.0, eq_mid: float = 0.0,
+                   eq_treble: float = 0.0) -> str:
+    """Convert any audio file to MP3 using ffmpeg with EQ and loudness normalization.
+
+    Args:
+        loudnorm_i: Integrated loudness target in LUFS (default -14).
+        loudnorm_tp: True peak in dBTP (default -1).
+        loudnorm_lra: Loudness range in LU (default 11).
+        eq_bass: Low-shelf gain at 200Hz in dB (-6 to +6, default 0).
+        eq_mid: Peaking EQ gain at 1kHz in dB (-6 to +6, default 0).
+        eq_treble: High-shelf gain at 8kHz in dB (-6 to +6, default 0).
+    """
     mp3_path = os.path.splitext(audio_path)[0] + ".mp3"
+
+    # Build filter chain: EQ first, then loudnorm
+    filters = []
+    if eq_bass != 0.0:
+        filters.append(f"lowshelf=f=200:g={eq_bass}")
+    if eq_mid != 0.0:
+        filters.append(f"equalizer=f=1000:width_type=o:w=1.5:g={eq_mid}")
+    if eq_treble != 0.0:
+        filters.append(f"highshelf=f=8000:g={eq_treble}")
+    filters.append(f"loudnorm=I={loudnorm_i}:TP={loudnorm_tp}:LRA={loudnorm_lra}")
+
+    af_filter = ",".join(filters)
+    print(f"[ACE-Step] ffmpeg filter: {af_filter}")
     subprocess.run(
         [
             "ffmpeg", "-y", "-i", audio_path,
-            "-af", "loudnorm=I=-14:TP=-1:LRA=11",
+            "-af", af_filter,
             "-b:a", "320k", "-q:a", "0", mp3_path,
         ],
         capture_output=True,
@@ -279,12 +303,67 @@ def handler(job):
         os.unlink(tmp_dl)
         print(f"[ACE-Step] Cover source audio converted to WAV for torchaudio")
 
-    # Generation parameters (from UI or admin defaults)
+    # Generation parameters (from UI admin panel sliders)
     guidance_scale = float(input_data.get("guidance_scale", 6.5))
     lm_cfg_scale = float(input_data.get("lm_cfg_scale", 1.6))
     shift_val = float(input_data.get("shift", 1.0))
     inference_steps = int(input_data.get("inference_steps", 60))
+
+    # LM advanced params
+    lm_temperature = float(input_data.get("lm_temperature", 0.85))
+    lm_top_k = int(input_data.get("lm_top_k", 0))
+    lm_top_p = float(input_data.get("lm_top_p", 0.9))
+    lm_negative_prompt = input_data.get("lm_negative_prompt", "NO USER INPUT")
+
+    # DiT advanced params
+    use_adg = bool(input_data.get("use_adg", False))
+    cfg_interval_start = float(input_data.get("cfg_interval_start", 0.0))
+    cfg_interval_end = float(input_data.get("cfg_interval_end", 1.0))
+    infer_method = input_data.get("infer_method", "ode")
+    timesteps_str = input_data.get("timesteps", "")
+    latent_shift = float(input_data.get("latent_shift", 0.0))
+    latent_rescale = float(input_data.get("latent_rescale", 1.0))
+
+    # CoT / Thinking params
+    thinking = bool(input_data.get("thinking", True))
+    use_cot_metas = bool(input_data.get("use_cot_metas", True))
+    use_cot_caption = bool(input_data.get("use_cot_caption", True))
+    use_cot_language = bool(input_data.get("use_cot_language", True))
+
+    # Audio normalization params (ACE-Step internal normalization)
+    enable_normalization = bool(input_data.get("enable_normalization", True))
+    normalization_db = float(input_data.get("normalization_db", -1.0))
+
+    # ffmpeg loudnorm params (post-generation MP3 conversion)
+    loudnorm_i = float(input_data.get("loudnorm_i", -14.0))
+    loudnorm_tp = float(input_data.get("loudnorm_tp", -1.0))
+    loudnorm_lra = float(input_data.get("loudnorm_lra", 11.0))
+
+    # EQ bands (ffmpeg lowshelf/equalizer/highshelf filters, dB gain)
+    eq_bass = float(input_data.get("eq_bass", 0.0))
+    eq_mid = float(input_data.get("eq_mid", 0.0))
+    eq_treble = float(input_data.get("eq_treble", 0.0))
+
+    # Music metadata params
+    bpm_val = input_data.get("bpm")  # None = auto via CoT
+    keyscale = input_data.get("keyscale", "")
+    timesignature = input_data.get("timesignature", "")
+    vocal_language = input_data.get("vocal_language", "unknown")
+    instrumental = bool(input_data.get("instrumental", False))
+
+    # Parse custom timesteps string to list of floats
+    custom_timesteps = None
+    if timesteps_str and timesteps_str.strip():
+        try:
+            custom_timesteps = [float(t.strip()) for t in timesteps_str.split(",") if t.strip()]
+        except ValueError:
+            print(f"[ACE-Step] Warning: Could not parse timesteps '{timesteps_str}', ignoring")
+
     print(f"[ACE-Step] Params: cfg={guidance_scale}, lm={lm_cfg_scale}, shift={shift_val}, steps={inference_steps}")
+    print(f"[ACE-Step] LM: temp={lm_temperature}, top_k={lm_top_k}, top_p={lm_top_p}")
+    print(f"[ACE-Step] Norm: enable={enable_normalization}, db={normalization_db}, loudnorm_i={loudnorm_i}")
+    print(f"[ACE-Step] EQ: bass={eq_bass}, mid={eq_mid}, treble={eq_treble}")
+    print(f"[ACE-Step] Meta: bpm={bpm_val}, key={keyscale}, time={timesignature}, lang={vocal_language}")
 
     # Per-request LoRA scale override (from UI slider)
     request_lora_scale = input_data.get("lora_scale")
@@ -314,12 +393,38 @@ def handler(job):
                 caption=caption,
                 lyrics=lyrics,
                 duration=float(duration),
+                # DiT params
                 inference_steps=inference_steps,
                 guidance_scale=guidance_scale,
-                lm_cfg_scale=lm_cfg_scale,
-                seed=seed,
                 shift=shift_val,
-                infer_method="ode",   # Deterministic, faster
+                infer_method=infer_method,
+                use_adg=use_adg,
+                cfg_interval_start=cfg_interval_start,
+                cfg_interval_end=cfg_interval_end,
+                latent_shift=latent_shift,
+                latent_rescale=latent_rescale,
+                seed=seed,
+                **({"timesteps": custom_timesteps} if custom_timesteps else {}),
+                # LM params
+                lm_cfg_scale=lm_cfg_scale,
+                lm_temperature=lm_temperature,
+                lm_top_k=lm_top_k,
+                lm_top_p=lm_top_p,
+                lm_negative_prompt=lm_negative_prompt,
+                # CoT / Thinking
+                thinking=thinking,
+                use_cot_metas=use_cot_metas,
+                use_cot_caption=use_cot_caption,
+                use_cot_language=use_cot_language,
+                # Audio normalization
+                enable_normalization=enable_normalization,
+                normalization_db=normalization_db,
+                # Music metadata
+                **({"bpm": int(bpm_val)} if bpm_val is not None else {}),
+                keyscale=keyscale,
+                timesignature=timesignature,
+                vocal_language=vocal_language,
+                instrumental=instrumental,
                 # Cover/Remix: src_audio is the song to cover (NOT reference_audio!)
                 **({"src_audio": src_audio_path,
                     "audio_cover_strength": audio_cover_strength,
@@ -361,8 +466,9 @@ def handler(job):
                 else:
                     raise RuntimeError("No audio file found in output directory")
 
-            # Convert to MP3
-            mp3_path = convert_to_mp3(audio_path)
+            # Convert to MP3 (EQ + loudnorm from admin panel)
+            mp3_path = convert_to_mp3(audio_path, loudnorm_i=loudnorm_i, loudnorm_tp=loudnorm_tp,
+                                      loudnorm_lra=loudnorm_lra, eq_bass=eq_bass, eq_mid=eq_mid, eq_treble=eq_treble)
             if os.path.exists(audio_path) and audio_path != mp3_path:
                 os.unlink(audio_path)
 
