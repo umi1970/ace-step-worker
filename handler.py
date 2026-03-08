@@ -205,14 +205,15 @@ def check_song_quality(actual_duration, requested_duration):
 def master_audio(audio_path: str, loudnorm_i: float = -14.0, loudnorm_tp: float = -1.0,
                  loudnorm_lra: float = 11.0, eq_bass: float = 0.0, eq_mid: float = 0.0,
                  eq_treble: float = 0.0) -> tuple:
-    """Master audio with EQ + loudnorm, output both WAV (lossless) and MP3 (320kbps).
+    """Master audio: raw WAV kept as-is, MP3 mastered in one pass (EQ + loudnorm).
 
     Returns:
         (wav_path, mp3_path) tuple
+        wav_path = raw WAV from ACE-Step (lossless download)
+        mp3_path = mastered MP3 (streaming/playback)
     """
-    base = os.path.splitext(audio_path)[0]
-    wav_path = base + "_mastered.wav"
-    mp3_path = base + ".mp3"
+    wav_path = audio_path  # Raw WAV stays untouched
+    mp3_path = os.path.splitext(audio_path)[0] + ".mp3"
 
     # Build filter chain: EQ first, then loudnorm
     filters = []
@@ -227,25 +228,16 @@ def master_audio(audio_path: str, loudnorm_i: float = -14.0, loudnorm_tp: float 
     af_filter = ",".join(filters)
     print(f"[ACE-Step] ffmpeg filter: {af_filter}")
 
-    # Mastered WAV (lossless)
+    # Single pass: raw WAV → mastered MP3 (like old convert_to_mp3)
     subprocess.run(
         [
             "ffmpeg", "-y", "-i", audio_path,
             "-af", af_filter,
-            "-c:a", "pcm_s16le", wav_path,
-        ],
-        capture_output=True,
-        check=True,
-    )
-
-    # MP3 from mastered WAV (for streaming/playback)
-    subprocess.run(
-        [
-            "ffmpeg", "-y", "-i", wav_path,
             "-b:a", "320k", "-q:a", "0", mp3_path,
         ],
         capture_output=True,
         check=True,
+        timeout=120,
     )
     return wav_path, mp3_path
 
@@ -483,10 +475,10 @@ def handler(job):
             if os.path.exists(audio_path) and audio_path != wav_path:
                 os.unlink(audio_path)
 
-            # Get actual duration via ffprobe
+            # Get actual duration via ffprobe (from raw WAV — more accurate)
             probe = subprocess.run(
                 ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-                 "-of", "csv=p=0", mp3_path],
+                 "-of", "csv=p=0", wav_path],
                 capture_output=True, text=True,
             )
             actual_duration = float(probe.stdout.strip()) if probe.stdout.strip() else duration
@@ -523,7 +515,7 @@ def handler(job):
             })
 
             gen_time = time.time() - gen_start
-            print(f"[ACE-Step] Song {i+1} done in {gen_time:.1f}s -> {url}")
+            print(f"[ACE-Step] Song {i+1} done in {gen_time:.1f}s -> {mp3_url}")
 
         except Exception as e:
             print(f"[ACE-Step] Error generating song {i+1}: {e}")
