@@ -162,7 +162,7 @@ if not llm_handler.llm_initialized:
 download_lora()
 
 print(f"[ACE-Step] Loading LoRA from {LORA_DIR} (scale={LORA_SCALE})")
-lora_msg = dit_handler.load_lora(LORA_DIR)
+lora_msg = dit_handler.load_lora(LORA_LOCAL_PATH)
 print(f"[ACE-Step] LoRA load result: {lora_msg}")
 
 # v1.5 returns "❌ ..." on failure — crash if LoRA didn't load
