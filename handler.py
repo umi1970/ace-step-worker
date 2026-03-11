@@ -35,16 +35,20 @@ if missing:
 
 LORA_FILENAME = os.environ.get("LORA_FILENAME", "adapter_model.safetensors")
 LORA_SCALE = float(os.environ.get("LORA_SCALE", "0.33"))
-LORA_SUBFOLDER = os.environ.get("LORA_SUBFOLDER", "")  # "sft" oder "turbo"
 LORA_DIR = "/tmp/lora"
 LORA_LOCAL_PATH = os.path.join(LORA_DIR, LORA_FILENAME)
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 
-print(f"[ACE-Step] Config: SUPABASE_URL={SUPABASE_URL[:30]}..., LORA={LORA_FILENAME}, SCALE={LORA_SCALE}, SUBFOLDER={LORA_SUBFOLDER}")
 BUCKET_NAME = "mastered-songs"
 LORA_BUCKET = "ace-lora"
+
+# Determine LoRA subfolder: explicit ENV > auto-detect from ACE_MODEL_CONFIG
+ACE_MODEL_CONFIG = os.environ.get("ACE_MODEL_CONFIG", "acestep-v15-sft")
+LORA_SUBFOLDER = os.environ.get("LORA_SUBFOLDER", "turbo" if "turbo" in ACE_MODEL_CONFIG else "sft")
+
+print(f"[ACE-Step] Config: SUPABASE_URL={SUPABASE_URL[:30]}..., LORA={LORA_SUBFOLDER}/{LORA_FILENAME}, SCALE={LORA_SCALE}")
 
 # ACE-Step v1.5 repo is cloned to /app/ace-step-repo by Dockerfile
 PROJECT_ROOT = "/app/ace-step-repo"
