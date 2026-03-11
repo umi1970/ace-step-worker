@@ -35,13 +35,14 @@ if missing:
 
 LORA_FILENAME = os.environ.get("LORA_FILENAME", "adapter_model.safetensors")
 LORA_SCALE = float(os.environ.get("LORA_SCALE", "0.33"))
+LORA_SUBFOLDER = os.environ.get("LORA_SUBFOLDER", "")  # "sft" oder "turbo"
 LORA_DIR = "/tmp/lora"
 LORA_LOCAL_PATH = os.path.join(LORA_DIR, LORA_FILENAME)
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 
-print(f"[ACE-Step] Config: SUPABASE_URL={SUPABASE_URL[:30]}..., LORA={LORA_FILENAME}, SCALE={LORA_SCALE}")
+print(f"[ACE-Step] Config: SUPABASE_URL={SUPABASE_URL[:30]}..., LORA={LORA_FILENAME}, SCALE={LORA_SCALE}, SUBFOLDER={LORA_SUBFOLDER}")
 BUCKET_NAME = "mastered-songs"
 LORA_BUCKET = "ace-lora"
 
@@ -70,7 +71,7 @@ def download_lora():
     remote_version = None
 
     try:
-        remote_version = supabase.storage.from_(LORA_BUCKET).download("version.txt").decode("utf-8").strip()
+        remote_version = supabase.storage.from_(LORA_BUCKET).download(f"{LORA_SUBFOLDER}/version.txt").decode("utf-8").strip()
         local_version = None
         if os.path.exists(version_path):
             with open(version_path, "r") as f:
@@ -88,7 +89,7 @@ def download_lora():
     if needs_download:
         print(f"[ACE-Step] Downloading LoRA '{LORA_FILENAME}' from Supabase...")
         dl_start = time.time()
-        data = supabase.storage.from_(LORA_BUCKET).download(LORA_FILENAME)
+        data = supabase.storage.from_(LORA_BUCKET).download(f"{LORA_SUBFOLDER}/{LORA_FILENAME}")
         with open(LORA_LOCAL_PATH, "wb") as f:
             f.write(data)
         print(f"[ACE-Step] LoRA weights downloaded in {time.time() - dl_start:.1f}s "
@@ -96,7 +97,7 @@ def download_lora():
 
         # Download adapter_config.json (v1.5 REQUIRES this file!)
         print("[ACE-Step] Downloading adapter_config.json from Supabase...")
-        config_data = supabase.storage.from_(LORA_BUCKET).download("adapter_config.json")
+        config_data = supabase.storage.from_(LORA_BUCKET).download(f"{LORA_SUBFOLDER}/adapter_config.json")
         with open(config_path, "wb") as f:
             f.write(config_data)
         print("[ACE-Step] adapter_config.json downloaded")
@@ -111,7 +112,7 @@ def download_lora():
         # Still ensure config exists
         if not os.path.exists(config_path):
             print("[ACE-Step] Downloading adapter_config.json from Supabase...")
-            config_data = supabase.storage.from_(LORA_BUCKET).download("adapter_config.json")
+            config_data = supabase.storage.from_(LORA_BUCKET).download(f"{LORA_SUBFOLDER}/adapter_config.json")
             with open(config_path, "wb") as f:
                 f.write(config_data)
             print("[ACE-Step] adapter_config.json downloaded")
