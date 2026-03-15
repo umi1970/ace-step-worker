@@ -220,24 +220,61 @@ def master_audio(audio_path: str, loudnorm_i: float = -14.0, loudnorm_tp: float 
     wav_path = audio_path  # Raw WAV stays untouched
     mp3_path = os.path.splitext(audio_path)[0] + ".mp3"
 
-    # Build filter chain: EQ first, then loudnorm
-    filters = []
+    # Build EQ filter chain (applied before loudnorm)
+    eq_filters = []
     if eq_bass != 0.0:
-        filters.append(f"lowshelf=f=200:g={eq_bass}")
+        eq_filters.append(f"lowshelf=f=200:g={eq_bass}")
     if eq_mid != 0.0:
-        filters.append(f"equalizer=f=1000:width_type=o:w=1.5:g={eq_mid}")
+        eq_filters.append(f"equalizer=f=1000:width_type=o:w=1.5:g={eq_mid}")
     if eq_treble != 0.0:
-        filters.append(f"highshelf=f=8000:g={eq_treble}")
-    filters.append(f"loudnorm=I={loudnorm_i}:TP={loudnorm_tp}:LRA={loudnorm_lra}")
+        eq_filters.append(f"highshelf=f=8000:g={eq_treble}")
 
-    af_filter = ",".join(filters)
-    print(f"[ACE-Step] ffmpeg filter: {af_filter}")
+    # Dual-pass loudnorm: Pass 1 measures, Pass 2 applies uniformly (no pumping)
+    loudnorm_filter = f"loudnorm=I={loudnorm_i}:TP={loudnorm_tp}:LRA={loudnorm_lra}:print_format=json"
+    pass1_filters = eq_filters + [loudnorm_filter]
+    pass1_af = ",".join(pass1_filters)
 
-    # Single pass: raw WAV → mastered MP3 (like old convert_to_mp3)
+    print(f"[ACE-Step] loudnorm pass 1 (measure): {pass1_af}")
+    pass1 = subprocess.run(
+        ["ffmpeg", "-y", "-i", audio_path, "-af", pass1_af, "-f", "null", "-"],
+        capture_output=True, text=True, timeout=120,
+    )
+
+    # Parse measured values from stderr
+    import json as _json
+    measured = {}
+    stderr = pass1.stderr
+    json_start = stderr.rfind("{")
+    json_end = stderr.rfind("}") + 1
+    if json_start >= 0 and json_end > json_start:
+        try:
+            measured = _json.loads(stderr[json_start:json_end])
+        except Exception:
+            pass
+
+    if measured:
+        # Pass 2: apply with measured values (linear normalization, no dynamic pumping)
+        loudnorm_pass2 = (
+            f"loudnorm=I={loudnorm_i}:TP={loudnorm_tp}:LRA={loudnorm_lra}"
+            f":measured_I={measured.get('input_i', '-24.0')}"
+            f":measured_TP={measured.get('input_tp', '-1.0')}"
+            f":measured_LRA={measured.get('input_lra', '11.0')}"
+            f":measured_thresh={measured.get('input_thresh', '-34.0')}"
+            f":linear=true"
+        )
+        pass2_filters = eq_filters + [loudnorm_pass2]
+    else:
+        # Fallback: single pass if measurement failed
+        print("[ACE-Step] WARNING: loudnorm measurement failed, falling back to single pass")
+        pass2_filters = eq_filters + [f"loudnorm=I={loudnorm_i}:TP={loudnorm_tp}:LRA={loudnorm_lra}"]
+
+    pass2_af = ",".join(pass2_filters)
+    print(f"[ACE-Step] loudnorm pass 2 (apply): {pass2_af}")
+
     subprocess.run(
         [
             "ffmpeg", "-y", "-i", audio_path,
-            "-af", af_filter,
+            "-af", pass2_af,
             "-b:a", "320k", "-q:a", "0", mp3_path,
         ],
         capture_output=True,
