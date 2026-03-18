@@ -312,19 +312,6 @@ def handler(job):
     use_cot_caption = bool(input_data.get("use_cot_caption", True))
     use_cot_language = bool(input_data.get("use_cot_language", True))
 
-    # BUG WORKAROUND: ACE-Step crashes when use_cot_metas=False and no complete
-    # user metadata provided (user_metadata=None → .items() → AttributeError).
-    # Force use_cot_metas=True when we don't have all required metadata fields.
-    if not use_cot_metas:
-        bpm_check = input_data.get("bpm")
-        has_all = (bpm_check is not None and
-                   input_data.get("keyscale", "").strip() and
-                   input_data.get("timesignature", "").strip() and
-                   input_data.get("duration", -1) > 0)
-        if not has_all:
-            print("[ACE-Step] Warning: use_cot_metas=False but missing metadata fields, forcing to True")
-            use_cot_metas = True
-
     # Audio normalization params (ACE-Step internal normalization)
     enable_normalization = bool(input_data.get("enable_normalization", True))
     normalization_db = float(input_data.get("normalization_db", -2.5))
