@@ -207,79 +207,18 @@ def check_song_quality(actual_duration, requested_duration):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def master_audio(audio_path: str, loudnorm_i: float = -14.0, loudnorm_tp: float = -1.0,
-                 loudnorm_lra: float = 11.0, eq_bass: float = 0.0, eq_mid: float = 0.0,
-                 eq_treble: float = 0.0) -> tuple:
-    """Master audio: raw WAV kept as-is, MP3 mastered in one pass (EQ + loudnorm).
+def convert_to_mp3(audio_path: str) -> tuple:
+    """Convert WAV to MP3 (no mastering — mastering is done on-demand via Netlify).
 
     Returns:
         (wav_path, mp3_path) tuple
-        wav_path = raw WAV from ACE-Step (lossless download)
-        mp3_path = mastered MP3 (streaming/playback)
     """
-    wav_path = audio_path  # Raw WAV stays untouched
+    wav_path = audio_path
     mp3_path = os.path.splitext(audio_path)[0] + ".mp3"
 
-    # Build EQ filter chain (applied before loudnorm)
-    eq_filters = []
-    if eq_bass != 0.0:
-        eq_filters.append(f"lowshelf=f=200:g={eq_bass}")
-    if eq_mid != 0.0:
-        eq_filters.append(f"equalizer=f=1000:width_type=o:w=1.5:g={eq_mid}")
-    if eq_treble != 0.0:
-        eq_filters.append(f"highshelf=f=8000:g={eq_treble}")
-
-    # Dual-pass loudnorm: Pass 1 measures, Pass 2 applies uniformly (no pumping)
-    loudnorm_filter = f"loudnorm=I={loudnorm_i}:TP={loudnorm_tp}:LRA={loudnorm_lra}:print_format=json"
-    pass1_filters = eq_filters + [loudnorm_filter]
-    pass1_af = ",".join(pass1_filters)
-
-    print(f"[ACE-Step] loudnorm pass 1 (measure): {pass1_af}")
-    pass1 = subprocess.run(
-        ["ffmpeg", "-y", "-i", audio_path, "-af", pass1_af, "-f", "null", "-"],
-        capture_output=True, text=True, timeout=120,
-    )
-
-    # Parse measured values from stderr
-    import json as _json
-    measured = {}
-    stderr = pass1.stderr
-    json_start = stderr.rfind("{")
-    json_end = stderr.rfind("}") + 1
-    if json_start >= 0 and json_end > json_start:
-        try:
-            measured = _json.loads(stderr[json_start:json_end])
-        except Exception:
-            pass
-
-    if measured:
-        # Pass 2: apply with measured values (linear normalization, no dynamic pumping)
-        loudnorm_pass2 = (
-            f"loudnorm=I={loudnorm_i}:TP={loudnorm_tp}:LRA={loudnorm_lra}"
-            f":measured_I={measured.get('input_i', '-24.0')}"
-            f":measured_TP={measured.get('input_tp', '-1.0')}"
-            f":measured_LRA={measured.get('input_lra', '11.0')}"
-            f":measured_thresh={measured.get('input_thresh', '-34.0')}"
-            f":linear=true"
-        )
-        pass2_filters = eq_filters + [loudnorm_pass2]
-    else:
-        # Fallback: single pass if measurement failed
-        print("[ACE-Step] WARNING: loudnorm measurement failed, falling back to single pass")
-        pass2_filters = eq_filters + [f"loudnorm=I={loudnorm_i}:TP={loudnorm_tp}:LRA={loudnorm_lra}"]
-
-    pass2_af = ",".join(pass2_filters)
-    print(f"[ACE-Step] loudnorm pass 2 (apply): {pass2_af}")
-
     subprocess.run(
-        [
-            "ffmpeg", "-y", "-i", audio_path,
-            "-af", pass2_af,
-            "-b:a", "320k", "-q:a", "0", mp3_path,
-        ],
-        capture_output=True,
-        check=True,
-        timeout=120,
+        ["ffmpeg", "-y", "-i", audio_path, "-b:a", "320k", "-q:a", "0", mp3_path],
+        capture_output=True, check=True, timeout=120,
     )
     return wav_path, mp3_path
 
@@ -377,16 +316,6 @@ def handler(job):
     enable_normalization = bool(input_data.get("enable_normalization", True))
     normalization_db = float(input_data.get("normalization_db", -2.5))
 
-    # ffmpeg loudnorm params (post-generation MP3 conversion)
-    loudnorm_i = float(input_data.get("loudnorm_i", -13.9))
-    loudnorm_tp = float(input_data.get("loudnorm_tp", -2.5))
-    loudnorm_lra = float(input_data.get("loudnorm_lra", 20.0))
-
-    # EQ bands (ffmpeg lowshelf/equalizer/highshelf filters, dB gain)
-    eq_bass = float(input_data.get("eq_bass", 0.5))
-    eq_mid = float(input_data.get("eq_mid", 1.1))
-    eq_treble = float(input_data.get("eq_treble", -1.6))
-
     # Music metadata params
     bpm_val = input_data.get("bpm")  # None = auto via CoT
     keyscale = input_data.get("keyscale", "")
@@ -404,8 +333,7 @@ def handler(job):
 
     print(f"[ACE-Step] Params: cfg={guidance_scale}, lm={lm_cfg_scale}, shift={shift_val}, steps={inference_steps}")
     print(f"[ACE-Step] LM: temp={lm_temperature}, top_k={lm_top_k}, top_p={lm_top_p}")
-    print(f"[ACE-Step] Norm: enable={enable_normalization}, db={normalization_db}, loudnorm_i={loudnorm_i}")
-    print(f"[ACE-Step] EQ: bass={eq_bass}, mid={eq_mid}, treble={eq_treble}")
+    print(f"[ACE-Step] Norm: enable={enable_normalization}, db={normalization_db}")
     print(f"[ACE-Step] Meta: bpm={bpm_val}, key={keyscale}, time={timesignature}, lang={vocal_language}")
 
     # Per-request LoRA scale override (from UI slider)
@@ -413,10 +341,10 @@ def handler(job):
     if request_lora_scale is not None:
         scale = float(request_lora_scale)
         dit_handler.set_lora_scale(scale)
-        print(f"[ACE-Step] Using per-request lora_scale={scale}")
+        print(f"[ACE-Step] LoRA scale={scale} (per-request)")
     else:
         dit_handler.set_lora_scale(LORA_SCALE)
-        print(f"[ACE-Step] Using default lora_scale={LORA_SCALE}")
+        print(f"[ACE-Step] LoRA scale={LORA_SCALE} (default)")
 
     songs = []
     job_id = job.get("id", str(uuid.uuid4())[:8])
@@ -511,9 +439,8 @@ def handler(job):
                 else:
                     raise RuntimeError("No audio file found in output directory")
 
-            # Master audio: EQ + loudnorm → WAV (lossless) + MP3 (streaming)
-            wav_path, mp3_path = master_audio(audio_path, loudnorm_i=loudnorm_i, loudnorm_tp=loudnorm_tp,
-                                              loudnorm_lra=loudnorm_lra, eq_bass=eq_bass, eq_mid=eq_mid, eq_treble=eq_treble)
+            # Convert WAV to MP3 (no mastering — done on-demand via Netlify)
+            wav_path, mp3_path = convert_to_mp3(audio_path)
             if os.path.exists(audio_path) and audio_path != wav_path:
                 os.unlink(audio_path)
 
