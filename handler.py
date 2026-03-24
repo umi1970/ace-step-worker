@@ -20,6 +20,9 @@ import subprocess
 import glob as glob_mod
 
 import runpod
+import numpy as np
+import soundfile as sf
+# import noisereduce as nr  # TODO: uncomment when ready — pip install noisereduce
 from supabase import create_client
 
 # ---------------------------------------------------------------------------
@@ -122,9 +125,59 @@ def download_lora():
             print("[ACE-Step] adapter_config.json downloaded")
 
 
+def ensure_models():
+    """Download models on-demand if not present (optimized cold start).
+    
+    Since we removed model pre-download from Dockerfile to speed up image building,
+    this function ensures models are available when the handler initializes.
+    First request will take time (~5 min), but subsequent jobs are fast.
+    """
+    from pathlib import Path
+    from huggingface_hub import snapshot_download
+    
+    checkpoints_dir = Path(PROJECT_ROOT) / "checkpoints"
+    checkpoints_dir.mkdir(exist_ok=True, parents=True)
+    
+    # 1. Main model (VAE + Qwen3 Embedding)
+    main_model_path = checkpoints_dir / "main_model.safetensors"
+    if not main_model_path.exists():
+        print("[ACE-Step] Downloading main model (VAE + Qwen3)...")
+        try:
+            from acestep.model_downloader import download_main_model
+            download_main_model(checkpoints_dir)
+            print("[ACE-Step] Main model downloaded")
+        except Exception as e:
+            print(f"[ACE-Step] WARNING: Main model download failed: {e}")
+    
+    # 2. SFT DiT model
+    sft_model_path = checkpoints_dir / "acestep-v15-sft"
+    if not sft_model_path.exists():
+        print("[ACE-Step] Downloading SFT DiT model...")
+        try:
+            snapshot_download("ACE-Step/acestep-v15-sft", local_dir=str(sft_model_path))
+            print("[ACE-Step] SFT DiT model downloaded")
+        except Exception as e:
+            print(f"[ACE-Step] WARNING: SFT DiT model download failed: {e}")
+    
+    # 3. 4B LLM (best CoT quality)
+    llm_path = checkpoints_dir.parent / "acestep-5Hz-lm-4B"
+    if not llm_path.exists():
+        print("[ACE-Step] Downloading 4B LLM...")
+        try:
+            snapshot_download("ACE-Step/acestep-5Hz-lm-4B", local_dir=str(llm_path))
+            print("[ACE-Step] 4B LLM downloaded")
+        except Exception as e:
+            print(f"[ACE-Step] WARNING: 4B LLM download failed: {e}")
+    
+    print("[ACE-Step] Models ready for initialization")
+
+
 # ---------------------------------------------------------------------------
 # Load model (runs once at cold start) — ACE-Step v1.5 API
 # ---------------------------------------------------------------------------
+print("[ACE-Step] Ensuring models are available...")
+ensure_models()
+
 print("[ACE-Step] Loading model (v1.5 API)...")
 load_start = time.time()
 
@@ -205,10 +258,41 @@ def check_song_quality(actual_duration, requested_duration):
 
 
 # ---------------------------------------------------------------------------
+# Post-Processing: Noise Reduction
+# ---------------------------------------------------------------------------
+# TODO: uncomment when ready — requires: pip install noisereduce
+# Equivalent to Audacity Noise Reduction: 12dB, Sensitivity 6, Smoothing 6
+#
+# def apply_noise_reduction(audio_path: str, prop_decrease: float = 0.75) -> str:
+#     """Apply spectral-gating noise reduction to WAV file in-place.
+#
+#     prop_decrease: 0.0 = no reduction, 1.0 = full reduction.
+#         0.75 ≈ Audacity 12dB with sensitivity 6.
+#     """
+#     data, sr = sf.read(audio_path)
+#     reduced = nr.reduce_noise(
+#         y=data,
+#         sr=sr,
+#         prop_decrease=prop_decrease,
+#         n_fft=2048,
+#         freq_mask_smooth_hz=500,  # ~Audacity frequency smoothing 6
+#     )
+#     sf.write(audio_path, reduced, sr)
+#     print(f"[ACE-Step] Noise reduction applied (prop_decrease={prop_decrease})")
+#     return audio_path
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def convert_to_mp3(audio_path: str) -> tuple:
-    """Convert WAV to MP3 (no mastering — mastering is done on-demand via Netlify).
+def convert_to_mp3(audio_path: str, enable_loudnorm: bool = False,
+                   loudnorm_i: float = -14, loudnorm_tp: float = -1,
+                   loudnorm_lra: float = 11,
+                   eq_bass: float = 0, eq_mid: float = 0,
+                   eq_treble: float = 0) -> tuple:
+    """Convert WAV to MP3 with optional loudnorm + EQ.
+
+    When enable_loudnorm is False, does a plain conversion (no filters).
 
     Returns:
         (wav_path, mp3_path) tuple
@@ -216,10 +300,27 @@ def convert_to_mp3(audio_path: str) -> tuple:
     wav_path = audio_path
     mp3_path = os.path.splitext(audio_path)[0] + ".mp3"
 
-    subprocess.run(
-        ["ffmpeg", "-y", "-i", audio_path, "-b:a", "320k", "-q:a", "0", mp3_path],
-        capture_output=True, check=True, timeout=120,
-    )
+    filters = []
+
+    # EQ: lowshelf (bass), equalizer (mid), highshelf (treble)
+    if eq_bass != 0:
+        filters.append(f"lowshelf=f=200:g={eq_bass}")
+    if eq_mid != 0:
+        filters.append(f"equalizer=f=1000:width_type=o:w=1.5:g={eq_mid}")
+    if eq_treble != 0:
+        filters.append(f"highshelf=f=4000:g={eq_treble}")
+
+    # ffmpeg loudnorm (dual-pass would be better but single-pass is fine for serverless)
+    if enable_loudnorm:
+        filters.append(f"loudnorm=I={loudnorm_i}:TP={loudnorm_tp}:LRA={loudnorm_lra}")
+
+    cmd = ["ffmpeg", "-y", "-i", audio_path]
+    if filters:
+        cmd += ["-af", ",".join(filters)]
+        print(f"[ACE-Step] Audio filters: {','.join(filters)}")
+    cmd += ["-b:a", "320k", "-q:a", "0", mp3_path]
+
+    subprocess.run(cmd, capture_output=True, check=True, timeout=120)
     return wav_path, mp3_path
 
 
@@ -315,6 +416,16 @@ def handler(job):
     # Audio normalization params (ACE-Step internal normalization)
     enable_normalization = bool(input_data.get("enable_normalization", True))
     normalization_db = float(input_data.get("normalization_db", -2.5))
+
+    # ffmpeg loudnorm params (post-generation loudness normalization)
+    loudnorm_i = float(input_data.get("loudnorm_i", -14))
+    loudnorm_tp = float(input_data.get("loudnorm_tp", -1))
+    loudnorm_lra = float(input_data.get("loudnorm_lra", 11))
+
+    # EQ params (ffmpeg bass/mid/treble filters)
+    eq_bass = float(input_data.get("eq_bass", 0))
+    eq_mid = float(input_data.get("eq_mid", 0))
+    eq_treble = float(input_data.get("eq_treble", 0))
 
     # Music metadata params
     bpm_val = input_data.get("bpm")  # None = auto via CoT
@@ -439,8 +550,21 @@ def handler(job):
                 else:
                     raise RuntimeError("No audio file found in output directory")
 
-            # Convert WAV to MP3 (no mastering — done on-demand via Netlify)
-            wav_path, mp3_path = convert_to_mp3(audio_path)
+            # --- Noise Reduction (disabled — uncomment when ready) ---
+            # Audacity-equivalent: 12 dB reduction, sensitivity 6, smoothing 6
+            # audio_path = apply_noise_reduction(audio_path)
+
+            # Convert WAV to MP3 with optional loudnorm + EQ
+            wav_path, mp3_path = convert_to_mp3(
+                audio_path,
+                enable_loudnorm=enable_normalization,
+                loudnorm_i=loudnorm_i,
+                loudnorm_tp=loudnorm_tp,
+                loudnorm_lra=loudnorm_lra,
+                eq_bass=eq_bass,
+                eq_mid=eq_mid,
+                eq_treble=eq_treble,
+            )
             if os.path.exists(audio_path) and audio_path != wav_path:
                 os.unlink(audio_path)
 
