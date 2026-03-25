@@ -290,9 +290,10 @@ def convert_to_mp3(audio_path: str, enable_loudnorm: bool = False,
                    loudnorm_lra: float = 11,
                    eq_bass: float = 0, eq_mid: float = 0,
                    eq_treble: float = 0) -> tuple:
-    """Convert WAV to MP3 with optional loudnorm + EQ.
+    """Convert WAV to MP3 with optional loudnorm + EQ + hard limiter.
 
-    When enable_loudnorm is False, does a plain conversion (no filters).
+    Signal chain: EQ → Loudnorm → Hard Limiter (prevents clipping).
+    When enable_loudnorm is False, only the hard limiter is applied.
 
     Returns:
         (wav_path, mp3_path) tuple
@@ -313,6 +314,10 @@ def convert_to_mp3(audio_path: str, enable_loudnorm: bool = False,
     # ffmpeg loudnorm (dual-pass would be better but single-pass is fine for serverless)
     if enable_loudnorm:
         filters.append(f"loudnorm=I={loudnorm_i}:TP={loudnorm_tp}:LRA={loudnorm_lra}")
+
+    # Hard limiter — prevents clipping/distortion from EQ boosts and loudnorm overshoot
+    # -1dBTP ceiling with fast attack (5ms) to catch transients
+    filters.append("alimiter=limit=0.8913:attack=5:release=50:level=disabled")
 
     cmd = ["ffmpeg", "-y", "-i", audio_path]
     if filters:
