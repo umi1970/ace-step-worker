@@ -19,6 +19,7 @@ import tempfile
 import subprocess
 import glob as glob_mod
 
+import logging
 import runpod
 import numpy as np
 import soundfile as sf
@@ -175,6 +176,13 @@ def ensure_models():
 # ---------------------------------------------------------------------------
 # Load model (runs once at cold start) — ACE-Step v1.5 API
 # ---------------------------------------------------------------------------
+# Suppress noisy ACE-Step debug logs (audio_code tokens, tqdm progress bars)
+logging.getLogger("acestep").setLevel(logging.WARNING)
+logging.getLogger("acestep.llm_inference").setLevel(logging.WARNING)
+
+# Suppress tqdm progress bars (they spam hundreds of lines per song)
+os.environ["TQDM_DISABLE"] = "1"
+
 print("[ACE-Step] Ensuring models are available...")
 ensure_models()
 
