@@ -11,13 +11,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install uv (the package manager ACE-Step v1.5 uses)
 RUN pip install --no-cache-dir uv
 
-# Clone ACE-Step v1.5 repo — pinned to 45d9783 (SFT support + multi-LoRA + LoRA UUID fix)
-RUN git clone --recurse-submodules https://github.com/ace-step/ACE-Step-1.5.git /app/ace-step-repo && \
-    cd /app/ace-step-repo && git checkout 45d9783
+# Clone ACE-Step v1.5 repo — always latest (unpinned)
+RUN git clone --recurse-submodules https://github.com/ace-step/ACE-Step-1.5.git /app/ace-step-repo
 
 # Install all ACE-Step deps via uv (same as the working RunPod pod)
 WORKDIR /app/ace-step-repo
 RUN uv sync
+
+# Install nano-vllm (bundled in third_parts, needed for LLM backend="vllm")
+RUN if [ -d "third_parts/nano-vllm" ]; then uv pip install -e third_parts/nano-vllm; fi
 
 # Install RunPod + Supabase into the uv environment
 RUN uv pip install runpod>=1.7.0 supabase>=2.0.0 huggingface_hub
