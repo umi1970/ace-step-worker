@@ -21,8 +21,8 @@ RUN uv sync
 # Install nano-vllm (bundled in third_parts, needed for LLM backend="vllm")
 RUN if [ -d "third_parts/nano-vllm" ]; then uv pip install -e third_parts/nano-vllm; fi
 
-# Install RunPod + Supabase into the uv environment
-RUN uv pip install runpod>=1.7.0 supabase>=2.0.0 huggingface_hub
+# Install RunPod + Supabase + boto3 (R2/S3) into the uv environment
+RUN uv pip install runpod>=1.7.0 supabase>=2.0.0 huggingface_hub boto3>=1.35.0
 
 # Copy handler (last layer for fast rebuilds)
 COPY handler.py /app/handler.py

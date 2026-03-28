@@ -4,10 +4,11 @@ RunPod Serverless Handler for ACE-Step v1.5 Music Generation
 Uses ACE-Step v1.5 programmatic API (AceStepHandler + generate_music).
 Loads model + Turkish LoRA at cold start.
 LoRA is downloaded from Supabase Storage (ace-lora bucket) at startup.
-Generates audio, uploads to Supabase Storage, returns URLs.
+Generates audio, uploads to Cloudflare R2 Storage, returns URLs.
 
 Env vars (set in RunPod Template):
-  SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+  SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY  (still needed for LoRA downloads)
+  R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME, R2_PUBLIC_URL
   LORA_FILENAME (default: adapter_model.safetensors)
   LORA_SCALE (default: 0.45)
 """
@@ -25,11 +26,13 @@ import numpy as np
 import soundfile as sf
 # import noisereduce as nr  # TODO: uncomment when ready — pip install noisereduce
 from supabase import create_client
+import boto3
 
 # ---------------------------------------------------------------------------
 # Config — check ALL required env vars upfront
 # ---------------------------------------------------------------------------
-REQUIRED_ENV = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]
+REQUIRED_ENV = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY",
+                "R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET_NAME", "R2_PUBLIC_URL"]
 missing = [k for k in REQUIRED_ENV if not os.environ.get(k)]
 if missing:
     raise RuntimeError(
@@ -45,19 +48,35 @@ LORA_LOCAL_PATH = os.path.join(LORA_DIR, LORA_FILENAME)
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 
-BUCKET_NAME = "mastered-songs"
-LORA_BUCKET = "ace-lora"
+LORA_BUCKET = "ace-lora"  # LoRA stays on Supabase
+
+# R2 config for audio uploads
+R2_ENDPOINT = os.environ["R2_ENDPOINT"]
+R2_ACCESS_KEY_ID = os.environ["R2_ACCESS_KEY_ID"]
+R2_SECRET_ACCESS_KEY = os.environ["R2_SECRET_ACCESS_KEY"]
+R2_BUCKET_NAME = os.environ["R2_BUCKET_NAME"]
+R2_PUBLIC_URL = os.environ["R2_PUBLIC_URL"]
+R2_AUDIO_PREFIX = "audio"  # files stored as audio/ace-xxx.mp3
 
 # Determine LoRA subfolder: explicit ENV > auto-detect from ACE_MODEL_CONFIG
 ACE_MODEL_CONFIG = os.environ.get("ACE_MODEL_CONFIG", "acestep-v15-sft")
-LORA_SUBFOLDER = os.environ.get("LORA_SUBFOLDER", "turbo" if "turbo" in ACE_MODEL_CONFIG else "sft")
+LORA_SUBFOLDER = os.environ.get("LORA_SUBFOLDER", "turbo" if "turbo" in ACE_MODEL_CONFIG else "base" if "base" in ACE_MODEL_CONFIG else "sft")
 
 print(f"[ACE-Step] Config: SUPABASE_URL={SUPABASE_URL[:30]}..., LORA={LORA_SUBFOLDER}/{LORA_FILENAME}, SCALE={LORA_SCALE}")
 
 # ACE-Step v1.5 repo is cloned to /app/ace-step-repo by Dockerfile
 PROJECT_ROOT = "/app/ace-step-repo"
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)  # still needed for LoRA
+
+# R2 client (S3-compatible)
+r2_client = boto3.client(
+    "s3",
+    endpoint_url=R2_ENDPOINT,
+    aws_access_key_id=R2_ACCESS_KEY_ID,
+    aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+    region_name="auto",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -179,9 +198,14 @@ def ensure_models():
 # Suppress noisy ACE-Step debug logs (audio_code tokens, tqdm progress bars)
 logging.getLogger("acestep").setLevel(logging.WARNING)
 logging.getLogger("acestep.llm_inference").setLevel(logging.WARNING)
+logging.getLogger("customized_vllm").setLevel(logging.WARNING)
+logging.getLogger("nano_vllm").setLevel(logging.WARNING)
 
 # Suppress tqdm progress bars (they spam hundreds of lines per song)
 os.environ["TQDM_DISABLE"] = "1"
+
+# Suppress vllm/inference progress bars that bypass tqdm
+os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
 
 print("[ACE-Step] Ensuring models are available...")
 ensure_models()
@@ -337,16 +361,18 @@ def convert_to_mp3(audio_path: str, enable_loudnorm: bool = False,
     return wav_path, mp3_path
 
 
-def upload_to_supabase(file_path: str, filename: str) -> str:
-    """Upload a file to Supabase Storage and return the public URL."""
+def upload_to_r2(file_path: str, filename: str) -> str:
+    """Upload a file to Cloudflare R2 and return the public URL."""
+    content_type = "audio/mpeg" if filename.endswith(".mp3") else "audio/wav"
+    key = f"{R2_AUDIO_PREFIX}/{filename}"
     with open(file_path, "rb") as f:
-        content_type = "audio/mpeg" if filename.endswith(".mp3") else "audio/wav"
-        supabase.storage.from_(BUCKET_NAME).upload(
-            filename,
-            f.read(),
-            {"content-type": content_type},
+        r2_client.put_object(
+            Bucket=R2_BUCKET_NAME,
+            Key=key,
+            Body=f,
+            ContentType=content_type,
         )
-    return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET_NAME}/{filename}"
+    return f"{R2_PUBLIC_URL}/{key}"
 
 
 # ---------------------------------------------------------------------------
@@ -608,8 +634,8 @@ def handler(job):
             # Upload both WAV (lossless download) + MP3 (streaming/playback) to Supabase
             wav_filename = f"ace-{job_id}_{i+1}.wav"
             mp3_filename = f"ace-{job_id}_{i+1}.mp3"
-            wav_url = upload_to_supabase(wav_path, wav_filename)
-            mp3_url = upload_to_supabase(mp3_path, mp3_filename)
+            wav_url = upload_to_r2(wav_path, wav_filename)
+            mp3_url = upload_to_r2(mp3_path, mp3_filename)
             os.unlink(wav_path)
             os.unlink(mp3_path)
 
