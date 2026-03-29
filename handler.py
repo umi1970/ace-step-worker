@@ -28,6 +28,9 @@ import soundfile as sf
 from supabase import create_client
 import boto3
 
+# Suppress verbose ACE-Step library logs (loguru INFO spam)
+logging.getLogger("acestep").setLevel(logging.WARNING)
+
 # ---------------------------------------------------------------------------
 # Config — check ALL required env vars upfront
 # ---------------------------------------------------------------------------
