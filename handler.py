@@ -16,6 +16,8 @@ Env vars (set in RunPod Template):
 import os
 import uuid
 import time
+import random
+import shutil
 import tempfile
 import subprocess
 import glob as glob_mod
@@ -45,8 +47,28 @@ if missing:
 
 LORA_FILENAME = os.environ.get("LORA_FILENAME", "adapter_model.safetensors")
 LORA_SCALE = float(os.environ.get("LORA_SCALE", "0.33"))
-LORA_DIR = "/tmp/lora"
-LORA_LOCAL_PATH = os.path.join(LORA_DIR, LORA_FILENAME)
+
+# RunPod Network Volume (mounted at /runpod-volume when attached to the endpoint).
+# Models + LoRA are cached there so cold starts skip the ~15GB HuggingFace download.
+RUNPOD_VOLUME = "/runpod-volume"
+HAS_VOLUME = os.path.isdir(RUNPOD_VOLUME)
+VOLUME_CACHE_ROOT = os.path.join(RUNPOD_VOLUME, "ace-step")
+
+# Auto-duration: when the request has no explicit duration (duration <= 0), each song
+# gets a RANDOM duration from this range — variable song lengths, but bounded compute
+# (LM tokens + DiT time scale linearly with duration; the LM used to pick 4-5 min).
+# Set AUTO_DURATION_MODE=lm to restore the old behavior (LM decides freely).
+AUTO_DURATION_MIN = float(os.environ.get("AUTO_DURATION_MIN", "150"))
+AUTO_DURATION_MAX = float(os.environ.get("AUTO_DURATION_MAX", "240"))
+AUTO_DURATION_MODE = os.environ.get("AUTO_DURATION_MODE", "random")  # random | lm
+
+# Flash attention speeds up both LM and DiT on supported GPUs (4090/L40S/A100).
+# Off by default — flip USE_FLASH_ATTENTION=1 in the RunPod template to test.
+USE_FLASH_ATTENTION = os.environ.get("USE_FLASH_ATTENTION", "0") == "1"
+
+# WAV upload (~50MB per song) is only needed for the lossless-download feature.
+# UPLOAD_WAV=0 (or per-request upload_wav=false) skips it and saves ~5-8s per song.
+UPLOAD_WAV_DEFAULT = os.environ.get("UPLOAD_WAV", "1") == "1"
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
@@ -64,6 +86,11 @@ R2_AUDIO_PREFIX = "audio"  # files stored as audio/ace-xxx.mp3
 # Determine LoRA subfolder: explicit ENV > auto-detect from ACE_MODEL_CONFIG
 ACE_MODEL_CONFIG = os.environ.get("ACE_MODEL_CONFIG", "acestep-v15-sft")
 LORA_SUBFOLDER = os.environ.get("LORA_SUBFOLDER", "turbo" if "turbo" in ACE_MODEL_CONFIG else "base" if "base" in ACE_MODEL_CONFIG else "sft")
+
+# LoRA cache: on the network volume (persists across cold starts, keyed by
+# subfolder so sft/turbo endpoints sharing one volume don't collide), else /tmp.
+LORA_DIR = os.path.join(VOLUME_CACHE_ROOT, "lora", LORA_SUBFOLDER) if HAS_VOLUME else "/tmp/lora"
+LORA_LOCAL_PATH = os.path.join(LORA_DIR, LORA_FILENAME)
 
 print(f"[ACE-Step] Config: SUPABASE_URL={SUPABASE_URL[:30]}..., LORA={LORA_SUBFOLDER}/{LORA_FILENAME}, SCALE={LORA_SCALE}")
 
@@ -148,6 +175,41 @@ def download_lora():
             print("[ACE-Step] adapter_config.json downloaded")
 
 
+def setup_model_cache():
+    """Symlink model directories onto the RunPod network volume (if attached).
+
+    ensure_models() then downloads into the volume transparently, and every
+    later cold start finds the models already there (seconds instead of ~5 min).
+
+    NOTE: On the very first deploy with an empty volume, set max workers to 1
+    until the cache is warm — concurrent first-time downloads into the same
+    volume path can corrupt files.
+    """
+    if not HAS_VOLUME:
+        print("[ACE-Step] No network volume at /runpod-volume — models cached per-container only")
+        return
+
+    # checkpoints/ (main model + DiT) and acestep-5Hz-lm-4B/ (LLM) both live
+    # under PROJECT_ROOT — see ensure_models() paths.
+    for name in ("checkpoints", "acestep-5Hz-lm-4B"):
+        target = os.path.join(PROJECT_ROOT, name)
+        cache_dir = os.path.join(VOLUME_CACHE_ROOT, name)
+        os.makedirs(cache_dir, exist_ok=True)
+
+        if os.path.islink(target):
+            continue
+        if os.path.isdir(target):
+            # Image already contains files (e.g. baked checkpoints) — move them
+            # into the cache once, then replace the directory with a symlink.
+            for item in os.listdir(target):
+                dst = os.path.join(cache_dir, item)
+                if not os.path.exists(dst):
+                    shutil.move(os.path.join(target, item), dst)
+            shutil.rmtree(target)
+        os.symlink(cache_dir, target)
+        print(f"[ACE-Step] Model cache: {target} -> {cache_dir}")
+
+
 def ensure_models():
     """Download models on-demand if not present (optimized cold start).
     
@@ -211,6 +273,7 @@ os.environ["TQDM_DISABLE"] = "1"
 os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
 
 print("[ACE-Step] Ensuring models are available...")
+setup_model_cache()
 ensure_models()
 
 print("[ACE-Step] Loading model (v1.5 API)...")
@@ -226,7 +289,7 @@ init_status, init_success = dit_handler.initialize_service(
     project_root=PROJECT_ROOT,
     config_path=os.environ.get("ACE_MODEL_CONFIG", "acestep-v15-sft"),
     device="cuda",
-    use_flash_attention=False,
+    use_flash_attention=USE_FLASH_ATTENTION,
     compile_model=False,
     offload_to_cpu=False,
     offload_dit_to_cpu=False,
@@ -396,8 +459,16 @@ def handler(job):
 
     lyrics = input_data.get("lyrics", "")
     caption = input_data.get("caption", "")
-    duration = input_data.get("duration", -1)  # -1 = auto (requires LLM for inference)
+    duration = input_data.get("duration", -1)  # -1 = auto (random range or LM, see below)
     num_songs = min(input_data.get("num_songs", 2), 4)
+
+    # Auto-duration settings (per-request override > env defaults)
+    auto_duration_mode = input_data.get("auto_duration_mode", AUTO_DURATION_MODE)
+    auto_duration_min = float(input_data.get("auto_duration_min", AUTO_DURATION_MIN))
+    auto_duration_max = float(input_data.get("auto_duration_max", AUTO_DURATION_MAX))
+
+    # WAV upload toggle (lossless download feature)
+    upload_wav = bool(input_data.get("upload_wav", UPLOAD_WAV_DEFAULT))
 
     # Cover mode parameters (verified from Gradio testing)
     task_type = input_data.get("task_type", "text2music")
@@ -509,6 +580,16 @@ def handler(job):
         gen_start = time.time()
         print(f"[ACE-Step] Generating song {i+1}/{num_songs}...")
 
+        # Resolve this song's duration: explicit > random from range > LM decides.
+        # Random mode keeps song lengths VARIABLE (different per song) while
+        # bounding compute — LM tokens + DiT time scale linearly with duration.
+        song_duration = float(duration)
+        if song_duration <= 0 and auto_duration_mode != "lm":
+            lo = max(30.0, min(auto_duration_min, auto_duration_max))
+            hi = max(auto_duration_min, auto_duration_max)
+            song_duration = float(round(random.uniform(lo, hi)))
+            print(f"[ACE-Step] Song {i+1}: random duration {song_duration:.0f}s (range {lo:.0f}-{hi:.0f}s)")
+
         try:
             # Build generation parameters (v1.5 dataclass API)
             # ALL params from admin panel — distortion comes from extreme slider values, not from passing params
@@ -517,7 +598,7 @@ def handler(job):
                 task_type=task_type,
                 caption=caption,
                 lyrics=lyrics,
-                duration=float(duration),
+                duration=song_duration,
                 seed=seed,
                 # DiT params
                 inference_steps=inference_steps,
@@ -619,7 +700,7 @@ def handler(job):
             actual_duration = float(probe.stdout.strip()) if probe.stdout.strip() else duration
 
             # Quality check — reject broken songs before uploading
-            is_valid, reject_reason = check_song_quality(actual_duration, duration)
+            is_valid, reject_reason = check_song_quality(actual_duration, song_duration)
             if not is_valid:
                 print(f"[ACE-Step] Song {i+1} REJECTED: {reject_reason}")
                 os.unlink(mp3_path)
@@ -634,19 +715,20 @@ def handler(job):
                 print(f"[ACE-Step] Song {i+1} rejected in {gen_time:.1f}s")
                 continue
 
-            # Upload both WAV (lossless download) + MP3 (streaming/playback) to Supabase
-            wav_filename = f"ace-{job_id}_{i+1}.wav"
+            # Upload MP3 (streaming/playback) + optionally WAV (lossless download, ~50MB)
             mp3_filename = f"ace-{job_id}_{i+1}.mp3"
-            wav_url = upload_to_r2(wav_path, wav_filename)
             mp3_url = upload_to_r2(mp3_path, mp3_filename)
+            wav_url = None
+            if upload_wav:
+                wav_filename = f"ace-{job_id}_{i+1}.wav"
+                wav_url = upload_to_r2(wav_path, wav_filename)
             os.unlink(wav_path)
             os.unlink(mp3_path)
 
             songs.append({
                 "url": mp3_url,
-                "wav_url": wav_url,
+                **({"wav_url": wav_url, "format": "wav"} if wav_url else {}),
                 "duration": round(actual_duration, 1),
-                "format": "wav",
             })
 
             gen_time = time.time() - gen_start
